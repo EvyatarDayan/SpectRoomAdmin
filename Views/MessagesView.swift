@@ -398,9 +398,7 @@ struct MessagesView: View {
     }
     
     private var emptyConversationsView: some View {
-        let hasMatches = !visibleMatches.isEmpty
-        
-        return VStack {
+        VStack {
             Spacer()
             VStack(spacing: 12) {
                 Text("💬")
@@ -421,24 +419,10 @@ struct MessagesView: View {
                     .foregroundColor(SpectRoomTheme.text)
                     .multilineTextAlignment(.center)
                 
-                Text((hasMatches ? "messages.empty.has.matches.description" : "messages.empty.no.matches.description").localized)
+                Text("messages.empty.no.matches.description".localized)
                     .font(.subheadline)
                     .foregroundColor(SpectRoomTheme.text)
                     .multilineTextAlignment(.center)
-                
-                Button(action: {
-                    selectedTab = hasMatches ? 1 : 2
-                }) {
-                    Text((hasMatches ? "messages.empty.has.matches.button" : "messages.empty.no.matches.button").localized)
-                        .font(.headline)
-                        .foregroundColor(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(Color.blue)
-                        .cornerRadius(12)
-                }
-                .padding(.top, 8)
-                .padding(.horizontal, 30)
             }
             .padding(.horizontal, 32)
             Spacer()

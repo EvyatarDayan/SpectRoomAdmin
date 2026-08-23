@@ -71,6 +71,7 @@
 "nav.messages" = "Nachrichten";
 "nav.profile" = "Profil";
 "nav.settings" = "Einstellungen";
+"nav.admin" = "Admin";
 
 // MARK: - Settings
 "settings.title" = "Einstellungen";

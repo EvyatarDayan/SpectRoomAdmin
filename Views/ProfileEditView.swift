@@ -1300,7 +1300,7 @@ struct ProfileEditView: View {
         if isMandatoryCompletion {
             appState.deferInitialProfileCompletion()
         } else if embedsInTabBar {
-            selectedTab = 2 // Home / Discover
+            selectedTab = AdminTab.settings.rawValue
         } else {
             dismiss()
         }
