@@ -2,7 +2,7 @@
 //  PreferredAgeRangeSlider.swift
 //  SpectRoom
 //
-//  Dual-thumb age range slider styled like EnergyLevelSlider.
+//  Dual-thumb age range slider.
 //  Only the thumbs are interactive — the track does not steal scroll gestures.
 //
 
