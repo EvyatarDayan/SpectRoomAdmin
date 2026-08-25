@@ -3,7 +3,9 @@ import Foundation
 enum AdminAccess {
     /// Emails that can open the Admin section and moderate reports.
     static let adminEmails: Set<String> = [
-        "admin1@yopmail.com"
+        "admin1@yopmail.com",
+        "admin2@yopmail.com",
+        "admin3@yopmail.com"
     ]
 
     static func isAdmin(email: String?) -> Bool {

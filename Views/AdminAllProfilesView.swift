@@ -2,6 +2,11 @@ import SwiftUI
 
 struct AdminAllProfilesView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var appState: AppStateManager
+
+    /// When `false`, this view is shown as a root tab (no Done button, tab-bar clearance).
+    var showsDismissButton: Bool = true
 
     @State private var profiles: [AdminUserProfile] = []
     @State private var searchText = ""
@@ -13,8 +18,12 @@ struct AdminAllProfilesView: View {
     @State private var selectedProfile: AdminUserProfile?
     @State private var loadError: String?
     @State private var searchTask: Task<Void, Never>?
-    @State private var filterFrozen = false
-    @State private var filterBanned = false
+    @State private var selectedStatusFilter: AdminProfileStatusFilter?
+    @State private var totalCount: Int?
+    /// Armed when the user scrolls toward later rows; cleared when they pull content down.
+    @State private var paginationArmedByBottomScroll = false
+
+    private let tabBarClearance: CGFloat = 88
 
     private var trimmedSearch: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -25,49 +34,58 @@ struct AdminAllProfilesView: View {
     }
 
     private var isStatusFilterActive: Bool {
-        filterFrozen || filterBanned
+        selectedStatusFilter != nil
     }
 
-    /// Profiles after Freeze / Ban chips (OR when both selected).
+    /// Profiles after a single Frozen / Banned / Deleted / Incomplete filter.
     private var displayedProfiles: [AdminUserProfile] {
-        guard isStatusFilterActive else { return profiles }
-        return profiles.filter { profile in
-            (filterFrozen && profile.isFrozen) || (filterBanned && profile.isBanned)
+        guard let selectedStatusFilter else { return profiles }
+        switch selectedStatusFilter {
+        case .frozen:
+            return profiles.filter(\.isFrozen)
+        case .banned:
+            return profiles.filter(\.isBanned)
+        case .deleted:
+            return profiles.filter(\.isDeleted)
+        case .incomplete:
+            return profiles.filter { $0.isIncomplete && !$0.isDeleted }
         }
     }
 
     var body: some View {
         NavigationView {
-            VStack(spacing: 0) {
-                searchBar
-                    .padding(.horizontal, 16)
-                    .padding(.top, 12)
-                    .padding(.bottom, 8)
-
-                filterBar
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
-
-                Group {
-                    if isLoading {
-                        ProgressView()
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else if let loadError, profiles.isEmpty {
-                        errorState(loadError)
-                    } else if displayedProfiles.isEmpty {
-                        emptyState
-                    } else {
-                        profilesList
-                    }
+            Group {
+                if appState.isAdminUser {
+                    profilesContent
+                } else {
+                    unauthorizedState
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .background(SpectRoomBackground())
             .navigationTitle("admin.all.profiles.title".localized)
             .navigationBarTitleDisplayMode(.inline)
+            .spectRoomNavigationChrome(colorScheme: colorScheme)
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("common.done".localized) { dismiss() }
+                ToolbarItem(placement: .principal) {
+                    Text("admin.all.profiles.title".localized)
+                        .font(.system(size: 28, weight: .bold))
+                }
+                if appState.isAdminUser {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        AdminFiltersMenu(
+                            options: Array(AdminProfileStatusFilter.allCases),
+                            selection: $selectedStatusFilter,
+                            clearTitle: "admin.all.profiles.filter.all".localized,
+                            clearSystemImage: "person.3",
+                            title: { $0.title },
+                            systemImage: { $0.systemImage }
+                        )
+                    }
+                }
+                if showsDismissButton {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button("common.done".localized) { dismiss() }
+                    }
                 }
             }
             .overlay {
@@ -89,16 +107,30 @@ struct AdminAllProfilesView: View {
             } message: {
                 Text(loadError ?? "")
             }
-            .task { await loadInitial() }
+            .task {
+                guard appState.isAdminUser else {
+                    isLoading = false
+                    return
+                }
+                await loadInitial()
+            }
             .onChange(of: searchText) { _, _ in
                 searchTask?.cancel()
                 searchTask = Task { await handleSearchChange() }
             }
-            .onChange(of: filterFrozen) { _, _ in
-                Task { await ensureFilteredResults() }
-            }
-            .onChange(of: filterBanned) { _, _ in
-                Task { await ensureFilteredResults() }
+            .onChange(of: selectedStatusFilter) { oldValue, newValue in
+                Task {
+                    if newValue == .incomplete || oldValue == .incomplete {
+                        if !isSearchActive {
+                            await loadInitial()
+                        } else {
+                            await refreshTotalCount()
+                        }
+                    } else {
+                        await ensureFilteredResults()
+                        await refreshTotalCount()
+                    }
+                }
             }
         }
         // Block sheet swipe-down while a profile (or its messages thread) is open.
@@ -106,6 +138,62 @@ struct AdminAllProfilesView: View {
         .onDisappear {
             searchTask?.cancel()
         }
+    }
+
+    private var profilesContent: some View {
+        VStack(spacing: 0) {
+            searchBar
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
+
+            if let totalCount {
+                Text(profilesCountText(for: totalCount))
+                    .font(.subheadline.weight(.medium))
+                    .foregroundColor(SpectRoomTheme.secondaryText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
+            }
+
+            Group {
+                if isLoading {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let loadError, profiles.isEmpty {
+                    errorState(loadError)
+                } else if displayedProfiles.isEmpty {
+                    emptyState
+                } else {
+                    profilesList
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.bottom, showsDismissButton ? 0 : tabBarClearance)
+        }
+    }
+
+    private func profilesCountText(for count: Int) -> String {
+        if count == 1 {
+            return "admin.all.profiles.count.one".localized
+        }
+        return String(format: "admin.all.profiles.count".localized, count)
+    }
+
+    private var unauthorizedState: some View {
+        VStack(spacing: 12) {
+            Spacer()
+            Image(systemName: "lock.shield")
+                .font(.system(size: 44))
+                .foregroundColor(SpectRoomTheme.secondaryText)
+            Text("admin.error.not.authorized".localized)
+                .font(.headline)
+                .foregroundColor(SpectRoomTheme.text)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var searchBar: some View {
@@ -136,69 +224,9 @@ struct AdminAllProfilesView: View {
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
-    private var filterBar: some View {
-        HStack(spacing: 10) {
-            filterChip(
-                title: "admin.all.profiles.filter.freeze".localized,
-                systemImage: "snowflake",
-                isSelected: filterFrozen,
-                selectedColor: .blue
-            ) {
-                filterFrozen.toggle()
-            }
-            filterChip(
-                title: "admin.all.profiles.filter.ban".localized,
-                systemImage: "person.crop.circle.badge.xmark",
-                isSelected: filterBanned,
-                selectedColor: .red
-            ) {
-                filterBanned.toggle()
-            }
-            Spacer(minLength: 0)
-            if !isLoading {
-                Text("\(displayedProfiles.count)")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundColor(SpectRoomTheme.secondaryText)
-                    .monospacedDigit()
-                    .accessibilityLabel("admin.all.profiles.title".localized)
-                    .accessibilityValue("\(displayedProfiles.count)")
-            }
-        }
-    }
-
-    private func filterChip(
-        title: String,
-        systemImage: String,
-        isSelected: Bool,
-        selectedColor: Color,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: systemImage)
-                    .font(.caption.weight(.semibold))
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-            }
-            .foregroundColor(isSelected ? .white : SpectRoomTheme.text)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(isSelected ? selectedColor : SpectRoomTheme.card)
-            .clipShape(Capsule())
-            .overlay(
-                Capsule()
-                    .strokeBorder(
-                        isSelected ? Color.clear : SpectRoomTheme.secondaryText.opacity(0.25),
-                        lineWidth: 1
-                    )
-            )
-        }
-        .buttonStyle(.plain)
-    }
-
     private var profilesList: some View {
         List {
-            ForEach(displayedProfiles) { profile in
+            ForEach(Array(displayedProfiles.enumerated()), id: \.element.id) { index, profile in
                 Button {
                     selectedProfile = profile
                 } label: {
@@ -209,15 +237,12 @@ struct AdminAllProfilesView: View {
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
                 .onAppear {
-                    if !isSearchActive, profile.id == displayedProfiles.last?.id {
-                        Task {
-                            if isStatusFilterActive {
-                                await ensureFilteredResults()
-                            } else {
-                                await loadMore()
-                            }
-                        }
-                    }
+                    // Only the last few rows can request the next page, and only after the
+                    // user has scrolled toward the bottom (not pull-down at the top).
+                    let nearEnd = index >= displayedProfiles.count - 3
+                    guard nearEnd, paginationArmedByBottomScroll else { return }
+                    guard !isSearchActive, hasMore, !isLoadingMore else { return }
+                    Task { await loadMoreFromScroll() }
                 }
             }
 
@@ -233,9 +258,10 @@ struct AdminAllProfilesView: View {
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
-        .refreshable {
-            await loadInitial()
-        }
+        .listPaginationScrollArming(
+            isArmed: $paginationArmedByBottomScroll,
+            direction: .towardBottom
+        )
     }
 
     private var emptyState: some View {
@@ -293,8 +319,31 @@ struct AdminAllProfilesView: View {
     @MainActor
     private func ensureFilteredResults() async {
         guard isStatusFilterActive, !isSearchActive else { return }
+        // Incomplete uses a dedicated Firestore query; no client-side page scan needed.
+        guard selectedStatusFilter != .incomplete else { return }
         var pagesLoaded = 0
         while displayedProfiles.count < 15, hasMore, !isLoadingMore, pagesLoaded < 8 {
+            pagesLoaded += 1
+            await loadMore()
+        }
+    }
+
+    /// Prefetch the next page when the user reaches the bottom of the list.
+    /// For client-side filters (frozen/banned/deleted), keep fetching until the
+    /// displayed list grows or we run out of pages — still only from bottom scroll.
+    @MainActor
+    private func loadMoreFromScroll() async {
+        guard !isSearchActive, hasMore, !isLoadingMore else { return }
+
+        let needsClientFilterPass = isStatusFilterActive && selectedStatusFilter != .incomplete
+        guard needsClientFilterPass else {
+            await loadMore()
+            return
+        }
+
+        let beforeCount = displayedProfiles.count
+        var pagesLoaded = 0
+        while displayedProfiles.count <= beforeCount, hasMore, pagesLoaded < 8 {
             pagesLoaded += 1
             await loadMore()
         }
@@ -311,7 +360,43 @@ struct AdminAllProfilesView: View {
     }
 
     @MainActor
+    private func fetchUsersPage(startAfterDocumentId: String? = nil) async throws -> FirebaseAuthService.AdminUsersPage {
+        if selectedStatusFilter == .incomplete, !isSearchActive {
+            return try await FirebaseAuthService.shared.fetchIncompleteAdminUsersPage(
+                limit: 25,
+                startAfterDocumentId: startAfterDocumentId
+            )
+        }
+        return try await FirebaseAuthService.shared.fetchAdminUsersPage(
+            limit: 25,
+            startAfterDocumentId: startAfterDocumentId
+        )
+    }
 
+    @MainActor
+    private func refreshTotalCount() async {
+        if isSearchActive {
+            totalCount = displayedProfiles.count
+            return
+        }
+
+        let filter: FirebaseAuthService.AdminUsersCountFilter
+        switch selectedStatusFilter {
+        case nil: filter = .all
+        case .frozen: filter = .frozen
+        case .banned: filter = .banned
+        case .deleted: filter = .deleted
+        case .incomplete: filter = .incomplete
+        }
+
+        do {
+            totalCount = try await FirebaseAuthService.shared.fetchAdminUsersTotalCount(filter: filter)
+        } catch {
+            print("⚠️ Failed fetching admin users total count: \(error.localizedDescription)")
+        }
+    }
+
+    @MainActor
     private func loadInitial() async {
         if isSearchActive {
             await performSearch()
@@ -320,17 +405,43 @@ struct AdminAllProfilesView: View {
 
         isLoading = true
         loadError = nil
+        paginationArmedByBottomScroll = false
         defer { isLoading = false }
 
         do {
-            let page = try await FirebaseAuthService.shared.fetchAdminUsersPage(limit: 25)
-            profiles = page.users
-            lastDocumentId = page.lastDocumentId
-            hasMore = page.hasMore
+            if selectedStatusFilter == .incomplete {
+                let page = try await fetchUsersPage()
+                profiles = page.users
+                lastDocumentId = page.lastDocumentId
+                hasMore = page.hasMore
+                totalCount = page.totalCount ?? totalCount
+            } else {
+                let countFilter: FirebaseAuthService.AdminUsersCountFilter
+                switch selectedStatusFilter {
+                case nil: countFilter = .all
+                case .frozen: countFilter = .frozen
+                case .banned: countFilter = .banned
+                case .deleted: countFilter = .deleted
+                case .incomplete: countFilter = .incomplete
+                }
+
+                async let pageTask = fetchUsersPage()
+                async let countTask = FirebaseAuthService.shared.fetchAdminUsersTotalCount(filter: countFilter)
+                let page = try await pageTask
+                profiles = page.users
+                lastDocumentId = page.lastDocumentId
+                hasMore = page.hasMore
+                do {
+                    totalCount = try await countTask
+                } catch {
+                    print("⚠️ Failed fetching admin users total count: \(error.localizedDescription)")
+                }
+            }
         } catch {
             profiles = []
             lastDocumentId = nil
             hasMore = false
+            totalCount = nil
             loadError = error.localizedDescription
         }
     }
@@ -342,14 +453,14 @@ struct AdminAllProfilesView: View {
         defer { isLoadingMore = false }
 
         do {
-            let page = try await FirebaseAuthService.shared.fetchAdminUsersPage(
-                limit: 25,
-                startAfterDocumentId: lastDocumentId
-            )
+            let page = try await fetchUsersPage(startAfterDocumentId: lastDocumentId)
             let existingIds = Set(profiles.map(\.id))
             profiles.append(contentsOf: page.users.filter { !existingIds.contains($0.id) })
             self.lastDocumentId = page.lastDocumentId
             hasMore = page.hasMore
+            if let pageTotal = page.totalCount {
+                totalCount = pageTotal
+            }
         } catch {
             loadError = error.localizedDescription
         }
@@ -386,6 +497,15 @@ struct AdminAllProfilesView: View {
             hasMore = false
             lastDocumentId = nil
             isLoading = false
+            totalCount = {
+                guard let selectedStatusFilter else { return results.count }
+                switch selectedStatusFilter {
+                case .frozen: return results.filter(\.isFrozen).count
+                case .banned: return results.filter(\.isBanned).count
+                case .deleted: return results.filter(\.isDeleted).count
+                case .incomplete: return results.filter { $0.isIncomplete && !$0.isDeleted }.count
+                }
+            }()
         } catch {
             guard !Task.isCancelled else { return }
             loadError = error.localizedDescription
@@ -409,9 +529,11 @@ private struct AdminAllProfileRow: View {
                         .foregroundColor(SpectRoomTheme.secondaryText)
                         .lineLimit(1)
                 }
-                Text(profile.statusLabelKey.localized)
+                Text(profile.statusDisplayText)
                     .font(.caption.weight(.semibold))
                     .foregroundColor(statusColor)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.85)
             }
             Spacer()
             Image(systemName: "chevron.right")
@@ -428,6 +550,7 @@ private struct AdminAllProfileRow: View {
     private var statusColor: Color {
         if profile.isDeleted || profile.isBanned { return .red }
         if profile.isFrozen { return .blue }
+        if profile.isIncomplete { return .orange }
         if profile.isOnline { return .green }
         return SpectRoomTheme.secondaryText
     }
@@ -459,6 +582,33 @@ private struct AdminAllProfileRow: View {
     }
 }
 
+private enum AdminProfileStatusFilter: CaseIterable, Identifiable {
+    case frozen
+    case banned
+    case deleted
+    case incomplete
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .frozen: return "admin.all.profiles.filter.freeze".localized
+        case .banned: return "admin.all.profiles.filter.ban".localized
+        case .deleted: return "admin.all.profiles.filter.deleted".localized
+        case .incomplete: return "admin.all.profiles.filter.incomplete".localized
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .frozen: return "snowflake"
+        case .banned: return "person.crop.circle.badge.xmark"
+        case .deleted: return "trash"
+        case .incomplete: return "person.crop.circle.badge.exclamationmark"
+        }
+    }
+}
+
 private struct AdminUserDetailOverlay: View {
     let profile: AdminUserProfile
     let onDismiss: () -> Void
@@ -471,6 +621,9 @@ private struct AdminUserDetailOverlay: View {
     @State private var conversations: [AdminRecentConversation] = []
     @State private var isLoadingMessages = false
     @State private var messagesError: String?
+    @State private var historyEvents: [AdminProfileHistoryEvent] = []
+    @State private var isLoadingHistory = false
+    @State private var historyError: String?
     @State private var selectedConversation: AdminRecentConversation?
     @State private var isExportingMessages = false
     @State private var showingExportShareSheet = false
@@ -481,6 +634,9 @@ private struct AdminUserDetailOverlay: View {
     @State private var restrictFollowUp: AdminProfileRestrictFollowUp?
     @State private var isPerformingRestrictAction = false
     @State private var restrictActionError: String?
+    @State private var showingResetPasswordSuccessSheet = false
+    @State private var isResettingPassword = false
+    @State private var resetPasswordError: String?
 
     init(
         profile: AdminUserProfile,
@@ -523,6 +679,8 @@ private struct AdminUserDetailOverlay: View {
                         profileTab
                     case .messages:
                         messagesTab
+                    case .history:
+                        historyTab
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -563,6 +721,14 @@ private struct AdminUserDetailOverlay: View {
                         showingRestrictSheet = false
                         handleRestrictSelection(action)
                     }
+                )
+                .zIndex(2)
+            }
+
+            if showingResetPasswordSuccessSheet {
+                AdminProfileResetPasswordOverlay(
+                    email: currentProfile.email,
+                    onClose: { showingResetPasswordSuccessSheet = false }
                 )
                 .zIndex(2)
             }
@@ -627,8 +793,22 @@ private struct AdminUserDetailOverlay: View {
         } message: {
             Text(restrictActionError ?? "")
         }
+        .alert("admin.all.profiles.reset.password".localized, isPresented: Binding(
+            get: { resetPasswordError != nil },
+            set: { if !$0 { resetPasswordError = nil } }
+        )) {
+            Button("common.ok".localized, role: .cancel) { resetPasswordError = nil }
+        } message: {
+            Text(resetPasswordError ?? "")
+        }
         .task(id: profile.id) {
             await loadMessages()
+            await loadHistory()
+        }
+        .onChange(of: selectedTab) { _, newTab in
+            if newTab == .history, historyEvents.isEmpty, !isLoadingHistory {
+                Task { await loadHistory() }
+            }
         }
     }
 
@@ -644,35 +824,47 @@ private struct AdminUserDetailOverlay: View {
                         .font(.subheadline)
                         .foregroundColor(secondaryText)
                 }
-                Text(currentProfile.statusLabelKey.localized)
+                Text(currentProfile.statusDisplayText)
                     .font(.caption.weight(.semibold))
                     .foregroundColor(secondaryText)
             }
             Spacer()
-            VStack(alignment: .trailing, spacing: 10) {
-                Button {
-                    exportMessages()
-                } label: {
-                    if isExportingMessages {
-                        ProgressView()
-                    } else {
-                        Text("admin.all.profiles.export".localized)
-                            .font(.subheadline.weight(.semibold))
-                    }
-                }
-                .disabled(isExportingMessages || isPerformingRestrictAction)
-                .buttonStyle(.plain)
-
+            Menu {
                 Button {
                     showingRestrictSheet = true
                 } label: {
-                    Text("admin.all.profiles.restrict".localized)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundColor(.orange)
+                    Label("admin.all.profiles.restrict".localized, systemImage: "exclamationmark.shield")
                 }
-                .disabled(isPerformingRestrictAction || currentProfile.isDeleted)
-                .buttonStyle(.plain)
+                .disabled(isPerformingRestrictAction || isResettingPassword || currentProfile.isDeleted)
+
+                Button {
+                    exportMessages()
+                } label: {
+                    Label("admin.all.profiles.export".localized, systemImage: "square.and.arrow.up")
+                }
+                .disabled(isExportingMessages || isPerformingRestrictAction || isResettingPassword)
+
+                Button {
+                    Task { await sendPasswordResetEmail() }
+                } label: {
+                    Label("admin.all.profiles.reset.password".localized, systemImage: "key.fill")
+                }
+                .disabled(
+                    isPerformingRestrictAction
+                        || isResettingPassword
+                        || currentProfile.isDeleted
+                        || currentProfile.email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+            } label: {
+                if isExportingMessages || isPerformingRestrictAction || isResettingPassword {
+                    ProgressView()
+                } else {
+                    Label("admin.all.profiles.actions".localized, systemImage: "ellipsis.circle")
+                        .font(.subheadline.weight(.semibold))
+                        .labelStyle(.titleAndIcon)
+                }
             }
+            .disabled(isExportingMessages || isPerformingRestrictAction || isResettingPassword)
         }
     }
 
@@ -791,6 +983,95 @@ private struct AdminUserDetailOverlay: View {
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
             }
+        }
+    }
+
+    private var historyTab: some View {
+        Group {
+            if isLoadingHistory {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let historyError {
+                Text(historyError)
+                    .font(.subheadline)
+                    .foregroundColor(secondaryText)
+                    .multilineTextAlignment(.center)
+                    .padding()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if historyEvents.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 34))
+                        .foregroundColor(.blue)
+                    Text("admin.all.profiles.history.empty".localized)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(primaryText)
+                    Text("admin.all.profiles.history.empty.description".localized)
+                        .font(.caption)
+                        .foregroundColor(secondaryText)
+                        .multilineTextAlignment(.center)
+                }
+                .padding()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 10) {
+                        ForEach(historyEvents) { event in
+                            historyRow(event)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
+                }
+            }
+        }
+    }
+
+    private func historyRow(_ event: AdminProfileHistoryEvent) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: event.systemImage)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(historyAccent(for: event))
+                .frame(width: 34, height: 34)
+                .background(historyAccent(for: event).opacity(0.14))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(event.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(primaryText)
+                    Spacer(minLength: 8)
+                    Text(event.date.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption2)
+                        .foregroundColor(secondaryText)
+                }
+                if let status = event.status, !status.isEmpty {
+                    Text(status)
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(historyAccent(for: event))
+                }
+                if let detail = event.detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundColor(secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.systemGray6).opacity(isLight ? 1 : 0.35))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func historyAccent(for event: AdminProfileHistoryEvent) -> Color {
+        switch event.kind {
+        case .reported, .warning: return .orange
+        case .freeze: return .blue
+        case .freezeEnded: return .mint
+        case .ban: return .red
+        case .banLifted: return .green
         }
     }
 
@@ -972,8 +1253,28 @@ private struct AdminUserDetailOverlay: View {
         defer { isPerformingRestrictAction = false }
         do {
             try await work()
+            await loadHistory()
         } catch {
             restrictActionError = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func sendPasswordResetEmail() async {
+        guard !isResettingPassword else { return }
+        let email = currentProfile.email.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !email.isEmpty else {
+            resetPasswordError = "admin.all.profiles.reset.password.error.no.email".localized
+            return
+        }
+
+        isResettingPassword = true
+        defer { isResettingPassword = false }
+        do {
+            try await FirebaseAuthService.shared.resetPassword(email: email)
+            showingResetPasswordSuccessSheet = true
+        } catch {
+            resetPasswordError = error.localizedDescription
         }
     }
 
@@ -988,10 +1289,22 @@ private struct AdminUserDetailOverlay: View {
             messagesError = error.localizedDescription
         }
     }
+
+    private func loadHistory() async {
+        isLoadingHistory = true
+        historyError = nil
+        defer { isLoadingHistory = false }
+        do {
+            historyEvents = try await FirebaseAuthService.shared.fetchAdminProfileModerationHistory(for: profile.id)
+        } catch {
+            historyEvents = []
+            historyError = error.localizedDescription
+        }
+    }
 }
 
 private enum AdminUserDetailTab: String, CaseIterable, Identifiable {
-    case profile, messages
+    case profile, messages, history
 
     var id: String { rawValue }
 
@@ -999,6 +1312,7 @@ private enum AdminUserDetailTab: String, CaseIterable, Identifiable {
         switch self {
         case .profile: return "admin.all.profiles.tab.profile".localized
         case .messages: return "admin.all.profiles.tab.messages".localized
+        case .history: return "admin.all.profiles.tab.history".localized
         }
     }
 }
@@ -1530,6 +1844,54 @@ private enum AdminProfileRestrictFollowUp: Equatable {
     case warning
     case freeze
     case ban
+}
+
+private struct AdminProfileResetPasswordOverlay: View {
+    let email: String
+    let onClose: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var isLight: Bool { colorScheme == .light }
+    private var panelBackground: Color { isLight ? .white : .black }
+    private var primaryText: Color { isLight ? .black : .white }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.8)
+                .ignoresSafeArea()
+                .onTapGesture(perform: onClose)
+
+            VStack(spacing: 16) {
+                Text(
+                    String(
+                        format: "admin.all.profiles.reset.password.success".localized,
+                        email
+                    )
+                )
+                .font(.body)
+                .foregroundColor(primaryText)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button(action: onClose) {
+                    Text("common.close".localized)
+                        .font(.body.weight(.semibold))
+                        .foregroundColor(primaryText)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color(.systemGray5))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 4)
+            }
+            .padding(20)
+            .background(panelBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .padding(.horizontal, 24)
+        }
+    }
 }
 
 private struct AdminProfileRestrictOverlay: View {

@@ -4,7 +4,6 @@ struct AdminHubView: View {
     @EnvironmentObject private var appState: AppStateManager
     @Environment(\.colorScheme) private var colorScheme
 
-    @State private var showingAdminAllProfiles = false
     @State private var showingAdminReports = false
     @State private var showingAdminFrozenProfiles = false
     @State private var showingAdminBannedProfiles = false
@@ -33,17 +32,17 @@ struct AdminHubView: View {
                         .font(.system(size: 28, weight: .bold))
                 }
             }
-            .sheet(isPresented: $showingAdminAllProfiles) {
-                AdminAllProfilesView()
-            }
             .sheet(isPresented: $showingAdminReports) {
                 AdminReportsView()
+                    .interactiveDismissDisabled(true)
             }
             .sheet(isPresented: $showingAdminFrozenProfiles) {
                 AdminFrozenProfilesView()
+                    .interactiveDismissDisabled(true)
             }
             .sheet(isPresented: $showingAdminBannedProfiles) {
                 AdminBannedProfilesView()
+                    .interactiveDismissDisabled(true)
             }
         }
         .navigationViewStyle(.stack)
@@ -51,16 +50,6 @@ struct AdminHubView: View {
 
     private var adminCards: some View {
         VStack(spacing: cardSpacing) {
-            adminCard(
-                title: "admin.all.profiles.button.title".localized,
-                subtitle: "admin.all.profiles.button.subtitle".localized,
-                systemImage: "person.3.fill",
-                iconColor: .purple,
-                iconPointSize: 22
-            ) {
-                showingAdminAllProfiles = true
-            }
-
             adminCard(
                 title: "admin.reports.button.title".localized,
                 subtitle: "admin.reports.button.subtitle".localized,
@@ -91,7 +80,7 @@ struct AdminHubView: View {
         .padding(.horizontal, horizontalPadding)
         .padding(.top, 12)
         .padding(.bottom, tabBarClearance)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private var unauthorizedState: some View {
@@ -158,6 +147,7 @@ struct AdminHubView: View {
             )
         }
         .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

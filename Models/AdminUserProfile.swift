@@ -19,6 +19,7 @@ struct AdminUserProfile: Identifiable, Equatable {
     let isFrozen: Bool
     let frozenUntil: Date?
     let isDeleted: Bool
+    let isIncomplete: Bool
     let createdAt: Date?
 
     var titleText: String {
@@ -32,8 +33,32 @@ struct AdminUserProfile: Identifiable, Equatable {
         if isDeleted { return "admin.all.profiles.status.deleted" }
         if isBanned { return "admin.all.profiles.status.banned" }
         if isFrozen { return "admin.all.profiles.status.frozen" }
+        if isIncomplete { return "admin.all.profiles.status.incomplete" }
         if isOnline { return "admin.all.profiles.status.online" }
         return "admin.all.profiles.status.offline"
+    }
+
+    /// Status shown in list / detail rows. Incomplete includes creation date when available.
+    var statusDisplayText: String {
+        if isDeleted || isBanned || isFrozen || !isIncomplete {
+            return statusLabelKey.localized
+        }
+        guard let createdAt else {
+            return "admin.all.profiles.status.incomplete".localized
+        }
+        let dateText = Self.formattedSinceDate(createdAt)
+        let format = "admin.all.profiles.status.incomplete.since".localized
+        if format == "admin.all.profiles.status.incomplete.since" || !format.contains("%@") {
+            return "Incomplete - Since \(dateText)"
+        }
+        return String(format: format, dateText)
+    }
+
+    private static func formattedSinceDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_GB")
+        formatter.dateFormat = "dd/MM/yy"
+        return formatter.string(from: date)
     }
 
     func applyingFreeze(until: Date) -> AdminUserProfile {
@@ -56,6 +81,7 @@ struct AdminUserProfile: Identifiable, Equatable {
             isFrozen: true,
             frozenUntil: until,
             isDeleted: isDeleted,
+            isIncomplete: isIncomplete,
             createdAt: createdAt
         )
     }
@@ -80,6 +106,57 @@ struct AdminUserProfile: Identifiable, Equatable {
             isFrozen: isFrozen,
             frozenUntil: frozenUntil,
             isDeleted: isDeleted,
+            isIncomplete: isIncomplete,
+            createdAt: createdAt
+        )
+    }
+
+    func withName(_ name: String) -> AdminUserProfile {
+        AdminUserProfile(
+            id: id,
+            name: name,
+            age: age,
+            email: email,
+            bio: bio,
+            photoURL: photoURL,
+            photos: photos,
+            gender: gender,
+            interests: interests,
+            interestedIn: interestedIn,
+            lookingFor: lookingFor,
+            locationDisplay: locationDisplay,
+            isOnline: isOnline,
+            lastSeen: lastSeen,
+            isBanned: isBanned,
+            isFrozen: isFrozen,
+            frozenUntil: frozenUntil,
+            isDeleted: isDeleted,
+            isIncomplete: isIncomplete,
+            createdAt: createdAt
+        )
+    }
+
+    func withAge(_ age: Int?) -> AdminUserProfile {
+        AdminUserProfile(
+            id: id,
+            name: name,
+            age: age,
+            email: email,
+            bio: bio,
+            photoURL: photoURL,
+            photos: photos,
+            gender: gender,
+            interests: interests,
+            interestedIn: interestedIn,
+            lookingFor: lookingFor,
+            locationDisplay: locationDisplay,
+            isOnline: isOnline,
+            lastSeen: lastSeen,
+            isBanned: isBanned,
+            isFrozen: isFrozen,
+            frozenUntil: frozenUntil,
+            isDeleted: isDeleted,
+            isIncomplete: isIncomplete,
             createdAt: createdAt
         )
     }
@@ -104,6 +181,32 @@ struct AdminUserProfile: Identifiable, Equatable {
             isFrozen: isFrozen,
             frozenUntil: frozenUntil,
             isDeleted: isDeleted,
+            isIncomplete: isIncomplete,
+            createdAt: createdAt
+        )
+    }
+
+    func withCreatedAt(_ createdAt: Date) -> AdminUserProfile {
+        AdminUserProfile(
+            id: id,
+            name: name,
+            age: age,
+            email: email,
+            bio: bio,
+            photoURL: photoURL,
+            photos: photos,
+            gender: gender,
+            interests: interests,
+            interestedIn: interestedIn,
+            lookingFor: lookingFor,
+            locationDisplay: locationDisplay,
+            isOnline: isOnline,
+            lastSeen: lastSeen,
+            isBanned: isBanned,
+            isFrozen: isFrozen,
+            frozenUntil: frozenUntil,
+            isDeleted: isDeleted,
+            isIncomplete: isIncomplete,
             createdAt: createdAt
         )
     }
@@ -127,4 +230,33 @@ struct AdminConversationMessage: Identifiable, Equatable {
     let isFromSubject: Bool
     let createdAt: Date
     let voiceDuration: TimeInterval?
+}
+
+enum AdminProfileHistoryKind: String, Equatable {
+    case reported
+    case warning
+    case freeze
+    case freezeEnded
+    case ban
+    case banLifted
+}
+
+struct AdminProfileHistoryEvent: Identifiable, Equatable {
+    let id: String
+    let kind: AdminProfileHistoryKind
+    let title: String
+    let detail: String?
+    let status: String?
+    let date: Date
+
+    var systemImage: String {
+        switch kind {
+        case .reported: return "exclamationmark.bubble.fill"
+        case .warning: return "exclamationmark.triangle.fill"
+        case .freeze: return "snowflake"
+        case .freezeEnded: return "sun.max.fill"
+        case .ban: return "person.crop.circle.badge.xmark"
+        case .banLifted: return "person.crop.circle.badge.checkmark"
+        }
+    }
 }

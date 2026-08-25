@@ -89,18 +89,10 @@ struct SpectRoomApp: App {
                 // Wait for Firebase to restore session before showing welcome/sign-in
                 LaunchAuthPlaceholderView()
             } else if appState.isAuthenticated {
-                if appState.hasCompletedInitialProfile {
-                    ContentView()
-                        .environmentObject(appState)
-                } else if appState.isNewSignup {
-                    // New user after signup - must complete profile
-                    ProfileEditView(isMandatoryCompletion: true)
-                        .environmentObject(appState)
-                } else {
-                    // Existing user with incomplete profile - allow access but encourage completion
-                    ContentView()
-                        .environmentObject(appState)
-                }
+                // Admin app has no consumer profile setup — go straight to the default tab.
+                // Non-admins see the unauthorized permission state on Dashboard / Restrict / etc.
+                ContentView()
+                    .environmentObject(appState)
             } else {
                 AuthenticationView()
                     .environmentObject(appState)

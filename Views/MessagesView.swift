@@ -1047,6 +1047,8 @@ struct MessageConversationModal: View {
     @State private var showingBlockedAlert = false
     @State private var hasMoreOlderMessages = false
     @State private var isLoadingOlderMessages = false
+    /// Armed when scrolling toward older messages (top); cleared when scrolling toward latest.
+    @State private var paginationArmedByOlderScroll = false
     @State private var cachedMessagesPool: [MessageDisplay] = []
     @State private var shouldScrollToBottom = false
     @State private var keyboardScrollToken = 0
@@ -1576,6 +1578,7 @@ struct MessageConversationModal: View {
                                 .id(msg.id)
                                 .onAppear {
                                     if msg.id == conversationMessages.first?.id {
+                                        guard paginationArmedByOlderScroll else { return }
                                         loadOlderMessagesIfNeeded()
                                     }
                                 }
@@ -1597,8 +1600,19 @@ struct MessageConversationModal: View {
                     .scrollDismissesKeyboard(.interactively)
                     // Land on the latest messages on the first frame (avoids top→bottom jump).
                     .defaultScrollAnchor(.bottom)
+                    .listPaginationScrollArming(
+                        isArmed: $paginationArmedByOlderScroll,
+                        direction: .towardTop
+                    )
+                    .onChange(of: paginationArmedByOlderScroll) { _, armed in
+                        // If the user scrolls toward older messages while already near the top,
+                        // onAppear may not fire again — load once when arming.
+                        guard armed else { return }
+                        loadOlderMessagesIfNeeded()
+                    }
                     .onAppear {
                         // One quiet pin after layout; no multi-delay animated chasing.
+                        paginationArmedByOlderScroll = false
                         scrollToLatestMessage(proxy: proxy, force: true, animated: false)
                     }
                     .onChange(of: isLoadingMessages) { _, isLoading in
@@ -2094,6 +2108,7 @@ struct MessageConversationModal: View {
     }
     
     private func loadOlderMessagesIfNeeded() {
+        guard paginationArmedByOlderScroll else { return }
         guard hasMoreOlderMessages, !isLoadingOlderMessages, !isLoadingMessages else { return }
         isLoadingOlderMessages = true
         

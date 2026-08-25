@@ -283,7 +283,7 @@ struct SearchView: View {
                         } else if shouldShowProfileIncompleteCard {
                             EmptyStateCard(
                                 isProfileIncomplete: true,
-                                onProfileTap: { selectedTab = 3 }
+                                onProfileTap: { selectedTab = AdminTab.settings.rawValue }
                             )
                         } else if currentCardIndex < profiles.count {
                             // Show only 3 cards in the pile (top card + 2 behind it)

@@ -293,12 +293,12 @@ class AppStateManager: ObservableObject {
                 try await firebaseAuth.signUp(email: email, password: password, name: name, age: age)
                 await MainActor.run {
                     self.isLoading = false
-                    // Mark as new signup to trigger mandatory profile completion
-                    self.isNewSignup = true
+                    // Admin app: skip consumer profile completion and open the main UI.
+                    self.isNewSignup = false
                     self.signUpName = name
-                    self.hasCompletedInitialProfile = false
+                    self.hasCompletedInitialProfile = true
                     self.saveAppState()
-                    print("🆕 New user signed up - will show mandatory profile completion")
+                    print("🆕 New admin user signed up — opening main app")
                 }
             } catch let error as SpectRoomAuthError {
                 await MainActor.run {
