@@ -7,10 +7,11 @@ struct AdminHubView: View {
     @State private var showingAdminReports = false
     @State private var showingAdminFrozenProfiles = false
     @State private var showingAdminBannedProfiles = false
+    @State private var showingAdminDeletedProfiles = false
 
     /// Space reserved for the custom tab bar above the home indicator.
     private let tabBarClearance: CGFloat = 88
-    private let cardSpacing: CGFloat = 16
+    private let cardSpacing: CGFloat = 10
     private let horizontalPadding: CGFloat = 20
 
     var body: some View {
@@ -42,6 +43,10 @@ struct AdminHubView: View {
             }
             .sheet(isPresented: $showingAdminBannedProfiles) {
                 AdminBannedProfilesView()
+                    .interactiveDismissDisabled(true)
+            }
+            .sheet(isPresented: $showingAdminDeletedProfiles) {
+                AdminDeletedProfilesView()
                     .interactiveDismissDisabled(true)
             }
         }
@@ -76,9 +81,18 @@ struct AdminHubView: View {
             ) {
                 showingAdminBannedProfiles = true
             }
+
+            adminCard(
+                title: "admin.deleted.button.title".localized,
+                subtitle: "admin.deleted.button.subtitle".localized,
+                systemImage: "trash.circle.fill",
+                iconColor: .purple
+            ) {
+                showingAdminDeletedProfiles = true
+            }
         }
         .padding(.horizontal, horizontalPadding)
-        .padding(.top, 12)
+        .padding(.top, 8)
         .padding(.bottom, tabBarClearance)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
@@ -104,26 +118,25 @@ struct AdminHubView: View {
         subtitle: String,
         systemImage: String,
         iconColor: Color,
-        iconPointSize: CGFloat = 28,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            HStack(spacing: 18) {
+            HStack(spacing: 14) {
                 Image(systemName: systemImage)
-                    .font(.system(size: iconPointSize, weight: .semibold))
+                    .font(.system(size: 22, weight: .semibold))
                     .foregroundColor(iconColor)
-                    .frame(width: 52, height: 52)
+                    .frame(width: 44, height: 44)
                     .background(iconColor.opacity(0.14))
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(title)
-                        .font(.title3.weight(.semibold))
+                        .font(.body.weight(.semibold))
                         .foregroundColor(SpectRoomTheme.text)
                         .lineLimit(1)
                         .minimumScaleFactor(0.85)
                     Text(subtitle)
-                        .font(.subheadline)
+                        .font(.caption)
                         .foregroundColor(SpectRoomTheme.secondaryText)
                         .lineLimit(2)
                         .minimumScaleFactor(0.85)
@@ -133,16 +146,16 @@ struct AdminHubView: View {
                 Spacer(minLength: 8)
 
                 Image(systemName: "chevron.right")
-                    .font(.body.weight(.semibold))
+                    .font(.caption.weight(.semibold))
                     .foregroundColor(SpectRoomTheme.secondaryText)
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 22)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             .background(SpectRoomTheme.card)
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .strokeBorder(SpectRoomTheme.subtleBorder(for: colorScheme), lineWidth: 1)
             )
         }

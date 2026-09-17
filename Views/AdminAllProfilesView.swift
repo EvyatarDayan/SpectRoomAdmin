@@ -1,4 +1,6 @@
 import SwiftUI
+import AVKit
+import Photos
 
 struct AdminAllProfilesView: View {
     @Environment(\.dismiss) private var dismiss
@@ -95,6 +97,9 @@ struct AdminAllProfilesView: View {
                         onDismiss: { self.selectedProfile = nil },
                         onProfileUpdated: { updated in
                             applyProfileUpdate(updated)
+                        },
+                        onProfileDeleted: { updated in
+                            applyDeletedProfile(updated)
                         }
                     )
                 }
@@ -360,6 +365,20 @@ struct AdminAllProfilesView: View {
     }
 
     @MainActor
+    private func applyDeletedProfile(_ updated: AdminUserProfile) {
+        applyProfileUpdate(updated)
+        selectedProfile = nil
+        // Incomplete / Frozen / Banned filters should no longer include this row.
+        switch selectedStatusFilter {
+        case .incomplete, .frozen, .banned:
+            profiles.removeAll { $0.id == updated.id }
+        default:
+            break
+        }
+        Task { await refreshTotalCount() }
+    }
+
+    @MainActor
     private func fetchUsersPage(startAfterDocumentId: String? = nil) async throws -> FirebaseAuthService.AdminUsersPage {
         if selectedStatusFilter == .incomplete, !isSearchActive {
             return try await FirebaseAuthService.shared.fetchIncompleteAdminUsersPage(
@@ -613,6 +632,7 @@ private struct AdminUserDetailOverlay: View {
     let profile: AdminUserProfile
     let onDismiss: () -> Void
     let onProfileUpdated: (AdminUserProfile) -> Void
+    let onProfileDeleted: (AdminUserProfile) -> Void
 
     @EnvironmentObject private var appState: AppStateManager
     @Environment(\.colorScheme) private var colorScheme
@@ -637,15 +657,20 @@ private struct AdminUserDetailOverlay: View {
     @State private var showingResetPasswordSuccessSheet = false
     @State private var isResettingPassword = false
     @State private var resetPasswordError: String?
+    @State private var showingDeleteConfirm = false
+    @State private var isDeletingAccount = false
+    @State private var deleteAccountError: String?
 
     init(
         profile: AdminUserProfile,
         onDismiss: @escaping () -> Void,
-        onProfileUpdated: @escaping (AdminUserProfile) -> Void
+        onProfileUpdated: @escaping (AdminUserProfile) -> Void,
+        onProfileDeleted: @escaping (AdminUserProfile) -> Void
     ) {
         self.profile = profile
         self.onDismiss = onDismiss
         self.onProfileUpdated = onProfileUpdated
+        self.onProfileDeleted = onProfileDeleted
         _currentProfile = State(initialValue: profile)
     }
 
@@ -801,6 +826,22 @@ private struct AdminUserDetailOverlay: View {
         } message: {
             Text(resetPasswordError ?? "")
         }
+        .alert("admin.all.profiles.delete.confirm.title".localized, isPresented: $showingDeleteConfirm) {
+            Button("common.cancel".localized, role: .cancel) {}
+            Button("common.delete".localized, role: .destructive) {
+                Task { await hardDeleteAccount() }
+            }
+        } message: {
+            Text("admin.all.profiles.delete.confirm.message".localized)
+        }
+        .alert("admin.reports.action.error.title".localized, isPresented: Binding(
+            get: { deleteAccountError != nil },
+            set: { if !$0 { deleteAccountError = nil } }
+        )) {
+            Button("common.ok".localized, role: .cancel) { deleteAccountError = nil }
+        } message: {
+            Text(deleteAccountError ?? "")
+        }
         .task(id: profile.id) {
             await loadMessages()
             await loadHistory()
@@ -835,14 +876,14 @@ private struct AdminUserDetailOverlay: View {
                 } label: {
                     Label("admin.all.profiles.restrict".localized, systemImage: "exclamationmark.shield")
                 }
-                .disabled(isPerformingRestrictAction || isResettingPassword || currentProfile.isDeleted)
+                .disabled(isPerformingRestrictAction || isResettingPassword || isDeletingAccount || currentProfile.isDeleted)
 
                 Button {
                     exportMessages()
                 } label: {
                     Label("admin.all.profiles.export".localized, systemImage: "square.and.arrow.up")
                 }
-                .disabled(isExportingMessages || isPerformingRestrictAction || isResettingPassword)
+                .disabled(isExportingMessages || isPerformingRestrictAction || isResettingPassword || isDeletingAccount)
 
                 Button {
                     Task { await sendPasswordResetEmail() }
@@ -852,11 +893,21 @@ private struct AdminUserDetailOverlay: View {
                 .disabled(
                     isPerformingRestrictAction
                         || isResettingPassword
+                        || isDeletingAccount
                         || currentProfile.isDeleted
                         || currentProfile.email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 )
+
+                Divider()
+
+                Button(role: .destructive) {
+                    showingDeleteConfirm = true
+                } label: {
+                    Label("admin.all.profiles.delete".localized, systemImage: "trash")
+                }
+                .disabled(isPerformingRestrictAction || isResettingPassword || isDeletingAccount)
             } label: {
-                if isExportingMessages || isPerformingRestrictAction || isResettingPassword {
+                if isExportingMessages || isPerformingRestrictAction || isResettingPassword || isDeletingAccount {
                     ProgressView()
                 } else {
                     Label("admin.all.profiles.actions".localized, systemImage: "ellipsis.circle")
@@ -864,7 +915,7 @@ private struct AdminUserDetailOverlay: View {
                         .labelStyle(.titleAndIcon)
                 }
             }
-            .disabled(isExportingMessages || isPerformingRestrictAction || isResettingPassword)
+            .disabled(isExportingMessages || isPerformingRestrictAction || isResettingPassword || isDeletingAccount)
         }
     }
 
@@ -1278,6 +1329,19 @@ private struct AdminUserDetailOverlay: View {
         }
     }
 
+    @MainActor
+    private func hardDeleteAccount() async {
+        guard !isDeletingAccount else { return }
+        isDeletingAccount = true
+        defer { isDeletingAccount = false }
+        do {
+            try await FirebaseAuthService.shared.hardDeleteAdminUser(userId: profile.id)
+            onProfileDeleted(currentProfile.applyingDeleted())
+        } catch {
+            deleteAccountError = error.localizedDescription
+        }
+    }
+
     private func loadMessages() async {
         isLoadingMessages = true
         messagesError = nil
@@ -1322,6 +1386,12 @@ private struct AdminConversationMediaItem: Identifiable, Equatable {
     var id: String { message.id }
     var isImage: Bool { message.type == .image }
     var isVoice: Bool { message.type == .voice }
+    var isVideo: Bool { message.type == .video }
+}
+
+private struct AdminVideoPlaybackItem: Identifiable, Equatable {
+    let id: String
+    let url: URL
 }
 
 private struct AdminConversationThreadOverlay: View {
@@ -1336,6 +1406,7 @@ private struct AdminConversationThreadOverlay: View {
     @State private var showingMediaGallery = false
     @State private var mediaViewerIndex: Int?
     @State private var mediaItems: [AdminConversationMediaItem] = []
+    @State private var videoPlaybackItem: AdminVideoPlaybackItem?
 
     private var isLight: Bool { colorScheme == .light }
     private var panelBackground: Color { isLight ? .white : .black }
@@ -1344,7 +1415,7 @@ private struct AdminConversationThreadOverlay: View {
 
     private var threadMediaItems: [AdminConversationMediaItem] {
         messages
-            .filter { $0.type == .image || $0.type == .voice }
+            .filter { $0.type == .image || $0.type == .voice || $0.type == .video }
             .map { AdminConversationMediaItem(message: $0) }
     }
 
@@ -1453,7 +1524,15 @@ private struct AdminConversationThreadOverlay: View {
                     mediaItems: mediaItems.isEmpty ? threadMediaItems : mediaItems,
                     onDismiss: { showingMediaGallery = false },
                     onSelect: { index in
-                        mediaViewerIndex = index
+                        let items = mediaItems.isEmpty ? threadMediaItems : mediaItems
+                        guard items.indices.contains(index) else { return }
+                        let item = items[index]
+                        if item.isVideo {
+                            showingMediaGallery = false
+                            openVideoPlayer(for: item.message)
+                        } else {
+                            mediaViewerIndex = index
+                        }
                     }
                 )
                 .transition(.opacity)
@@ -1474,6 +1553,9 @@ private struct AdminConversationThreadOverlay: View {
                 .zIndex(3)
             }
         }
+        .fullScreenCover(item: $videoPlaybackItem) { item in
+            AdminChatVideoPlayerScreen(url: item.url)
+        }
         .task(id: conversation.partnerId) {
             await loadThread()
         }
@@ -1491,7 +1573,7 @@ private struct AdminConversationThreadOverlay: View {
                     limit: 100
                 )
                 let items = all
-                    .filter { $0.type == .image || $0.type == .voice }
+                    .filter { $0.type == .image || $0.type == .voice || $0.type == .video }
                     .map { AdminConversationMediaItem(message: $0) }
                 await MainActor.run {
                     mediaItems = items
@@ -1586,7 +1668,18 @@ private struct AdminConversationThreadOverlay: View {
             )
             .frame(maxWidth: 240, alignment: isFromSubject ? .trailing : .leading)
 
-        case .text, .system, .video:
+        case .video:
+            Button {
+                openVideoPlayer(for: message)
+            } label: {
+                AdminChatVideoBubbleContent(
+                    thumbnailURL: message.thumbnailURL.flatMap(URL.init(string:)),
+                    durationText: formattedVideoDuration(message.videoDuration)
+                )
+            }
+            .buttonStyle(.plain)
+
+        case .text, .system:
             Text(message.content.isEmpty ? message.type.displayName : message.content)
                 .font(.subheadline)
                 .foregroundColor(primaryText)
@@ -1597,7 +1690,22 @@ private struct AdminConversationThreadOverlay: View {
         }
     }
 
+    private func openVideoPlayer(for message: AdminConversationMessage) {
+        guard let url = URL(string: message.content) else { return }
+        videoPlaybackItem = AdminVideoPlaybackItem(id: message.id, url: url)
+    }
+
+    private func formattedVideoDuration(_ duration: TimeInterval?) -> String? {
+        guard let duration, duration > 0 else { return nil }
+        let total = max(0, Int(duration.rounded()))
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
     private func openMediaViewer(for message: AdminConversationMessage) {
+        if message.type == .video {
+            openVideoPlayer(for: message)
+            return
+        }
         let items = threadMediaItems
         mediaItems = items
         if let index = items.firstIndex(where: { $0.id == message.id }) {
@@ -1719,6 +1827,20 @@ private struct AdminConversationMediaGalleryOverlay: View {
                             }
                             .frame(width: side, height: side)
                             .clipped()
+                        } else if item.isVideo {
+                            CachedAsyncImage(url: URL(string: item.message.thumbnailURL ?? "")) { image in
+                                image
+                                    .resizable()
+                                    .scaledToFill()
+                            } placeholder: {
+                                Color.black.opacity(0.2)
+                            }
+                            .frame(width: side, height: side)
+                            .clipped()
+                            Image(systemName: "play.circle.fill")
+                                .font(.system(size: 28))
+                                .foregroundStyle(.white.opacity(0.95))
+                                .shadow(radius: 2)
                         } else {
                             VStack(spacing: 6) {
                                 Image(systemName: "waveform")
@@ -1807,6 +1929,9 @@ private struct AdminConversationMediaViewerOverlay: View {
                     .tint(.white)
             }
             .padding(.horizontal, 24)
+        } else if item.isVideo {
+            AdminInlineVideoPlayerPage(url: URL(string: item.message.content))
+                .padding(.horizontal, 12)
         } else {
             VStack(spacing: 20) {
                 Image(systemName: "waveform.circle.fill")
@@ -1828,6 +1953,216 @@ private struct AdminConversationMediaViewerOverlay: View {
                 .frame(maxWidth: 280)
             }
             .padding(.horizontal, 24)
+        }
+    }
+}
+
+private struct AdminChatVideoBubbleContent: View {
+    let thumbnailURL: URL?
+    let durationText: String?
+
+    private let mediaSize: CGFloat = 180
+
+    var body: some View {
+        ZStack {
+            Group {
+                if let thumbnailURL {
+                    CachedAsyncImage(url: thumbnailURL) { image in
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    } placeholder: {
+                        ZStack {
+                            Color.black.opacity(0.2)
+                            ProgressView()
+                        }
+                    }
+                } else {
+                    Rectangle()
+                        .fill(Color.black.opacity(0.25))
+                }
+            }
+            .frame(width: mediaSize, height: mediaSize)
+            .clipped()
+
+            Image(systemName: "play.circle.fill")
+                .font(.system(size: 44))
+                .foregroundStyle(.white.opacity(0.95))
+                .shadow(radius: 2)
+
+            if let durationText {
+                VStack {
+                    Spacer(minLength: 0)
+                    HStack {
+                        Text(durationText)
+                            .font(.caption2)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.black.opacity(0.45))
+                            .clipShape(Capsule())
+                        Spacer(minLength: 0)
+                    }
+                    .padding(8)
+                }
+            }
+        }
+        .frame(width: mediaSize, height: mediaSize)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private struct AdminChatVideoPlayerScreen: View {
+    let url: URL
+    @Environment(\.dismiss) private var dismiss
+    @State private var player: AVPlayer?
+    @State private var isSaving = false
+    @State private var showingSaveAlert = false
+    @State private var saveSuccess = false
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Color.black.ignoresSafeArea()
+                if let player {
+                    VideoPlayer(player: player)
+                        .ignoresSafeArea(edges: .bottom)
+                } else {
+                    ProgressView()
+                        .tint(.white)
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("common.done".localized) {
+                        player?.pause()
+                        dismiss()
+                    }
+                    .foregroundColor(.white)
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("common.save".localized) {
+                        saveVideoToPhotoLibrary()
+                    }
+                    .foregroundColor(.white)
+                    .disabled(isSaving)
+                }
+            }
+            .toolbarBackground(.hidden, for: .navigationBar)
+            .toolbarColorScheme(.dark, for: .navigationBar)
+            .alert("messages.video.saved".localized, isPresented: $showingSaveAlert) {
+                Button("common.ok".localized) { }
+            } message: {
+                Text(saveSuccess ? "messages.video.saved.success".localized : "messages.video.saved.failed".localized)
+            }
+            .overlay {
+                if isSaving {
+                    ProgressView()
+                        .tint(.white)
+                        .padding(16)
+                        .background(Circle().fill(Color.black.opacity(0.45)))
+                }
+            }
+        }
+        .onAppear {
+            let avPlayer = AVPlayer(url: url)
+            player = avPlayer
+            avPlayer.play()
+        }
+        .onDisappear {
+            player?.pause()
+            player = nil
+        }
+    }
+
+    private func saveVideoToPhotoLibrary() {
+        guard !isSaving else { return }
+        isSaving = true
+
+        Task {
+            do {
+                var status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+                if status == .notDetermined {
+                    status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+                }
+                guard status == .authorized || status == .limited else {
+                    await MainActor.run {
+                        isSaving = false
+                        saveSuccess = false
+                        showingSaveAlert = true
+                    }
+                    return
+                }
+
+                let localURL: URL
+                if url.isFileURL {
+                    localURL = url
+                } else {
+                    let (tempURL, response) = try await URLSession.shared.download(from: url)
+                    let ext: String = {
+                        if let http = response as? HTTPURLResponse,
+                           let mime = http.mimeType?.lowercased() {
+                            if mime.contains("quicktime") { return "mov" }
+                            if mime.contains("webm") { return "webm" }
+                        }
+                        let pathExt = url.pathExtension.lowercased()
+                        return pathExt.isEmpty ? "mp4" : pathExt
+                    }()
+                    let dest = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("admin_video_save_\(UUID().uuidString).\(ext)")
+                    try? FileManager.default.removeItem(at: dest)
+                    try FileManager.default.moveItem(at: tempURL, to: dest)
+                    localURL = dest
+                }
+
+                try await PHPhotoLibrary.shared().performChanges {
+                    PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: localURL)
+                }
+
+                if !url.isFileURL {
+                    try? FileManager.default.removeItem(at: localURL)
+                }
+
+                await MainActor.run {
+                    isSaving = false
+                    saveSuccess = true
+                    showingSaveAlert = true
+                }
+            } catch {
+                print("❌ Error saving admin video: \(error.localizedDescription)")
+                await MainActor.run {
+                    isSaving = false
+                    saveSuccess = false
+                    showingSaveAlert = true
+                }
+            }
+        }
+    }
+}
+
+private struct AdminInlineVideoPlayerPage: View {
+    let url: URL?
+    @State private var player: AVPlayer?
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.2)
+            if let player {
+                VideoPlayer(player: player)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            } else {
+                ProgressView()
+                    .tint(.white)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear {
+            guard let url else { return }
+            let avPlayer = AVPlayer(url: url)
+            player = avPlayer
+            avPlayer.play()
+        }
+        .onDisappear {
+            player?.pause()
+            player = nil
         }
     }
 }

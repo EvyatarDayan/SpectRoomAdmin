@@ -554,7 +554,7 @@ class FirebaseAuthService: ObservableObject {
     
     // MARK: - Update Database with App State
     func updateDatabaseWithAppState() async {
-        guard let user = auth.currentUser else { return }
+        guard auth.currentUser != nil else { return }
         
         print("🔄 Updating database with current app state...")
         
@@ -2640,6 +2640,153 @@ class FirebaseAuthService: ObservableObject {
         var createdAts: [String: Date] = [:]
     }
 
+    /// Soft-deletes the Firestore profile (kept for admin as Deleted) and removes Auth so login/MFA cannot continue.
+    /// Admin-only; cannot delete the signed-in admin or other configured admin accounts.
+    func hardDeleteAdminUser(userId: String) async throws {
+        try requireAdmin()
+        let trimmed = userId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw NSError(
+                domain: "FirebaseAuthService",
+                code: 400,
+                userInfo: [NSLocalizedDescriptionKey: "User id required"]
+            )
+        }
+        if trimmed == Auth.auth().currentUser?.uid {
+            throw NSError(
+                domain: "FirebaseAuthService",
+                code: 400,
+                userInfo: [NSLocalizedDescriptionKey: "You cannot delete your own admin account"]
+            )
+        }
+
+        _ = try await Functions.functions(region: "us-central1")
+            .httpsCallable("adminHardDeleteUser")
+            .call(["userId": trimmed])
+    }
+
+    /// Restores a soft-deleted account (clears delete flags, recreates Auth if needed).
+    func undeleteAdminUser(userId: String) async throws {
+        try requireAdmin()
+        let trimmed = userId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw NSError(
+                domain: "FirebaseAuthService",
+                code: 400,
+                userInfo: [NSLocalizedDescriptionKey: "User id required"]
+            )
+        }
+
+        _ = try await Functions.functions(region: "us-central1")
+            .httpsCallable("adminUndeleteUser")
+            .call(["userId": trimmed])
+    }
+
+    /// Active deleted accounts for the Restrict → Deleted profiles screen.
+    func fetchDeletedProfilesForAdmin() async throws -> [DeletedProfile] {
+        try requireAdmin()
+
+        let snapshot = try await db.collection("users")
+            .whereField("isDeleted", isEqualTo: true)
+            .getDocuments()
+
+        let profiles = snapshot.documents.compactMap { document -> DeletedProfile? in
+            Self.parseDeletedProfile(documentID: document.documentID, data: document.data())
+        }
+        return profiles.sorted {
+            ($0.deletedAt ?? .distantPast) > ($1.deletedAt ?? .distantPast)
+        }
+    }
+
+    /// Accounts that were deleted and later restored by admin.
+    func fetchDeleteHistoryForAdmin() async throws -> [DeletedProfile] {
+        try requireAdmin()
+
+        var profilesByUserId: [String: DeletedProfile] = [:]
+
+        do {
+            let snapshot = try await db.collection("users")
+                .whereField("lastAccountRestoredAt", isGreaterThan: Timestamp(date: Date(timeIntervalSince1970: 0)))
+                .getDocuments()
+
+            for document in snapshot.documents {
+                let data = document.data()
+                guard data["isDeleted"] as? Bool != true,
+                      let profile = Self.parseRestoredDeleteFromUser(documentID: document.documentID, data: data)
+                else { continue }
+                profilesByUserId[profile.userId] = profile
+            }
+        } catch {
+            print("⚠️ Unable to load user-based delete history: \(error.localizedDescription)")
+        }
+
+        return profilesByUserId.values.sorted {
+            ($0.restoredAt ?? $0.deletedAt ?? .distantPast) > ($1.restoredAt ?? $1.deletedAt ?? .distantPast)
+        }
+    }
+
+    private static func parseDeletedProfile(documentID: String, data: [String: Any]) -> DeletedProfile? {
+        guard data["isDeleted"] as? Bool == true else { return nil }
+        let snapshot = freezeUserSnapshot(from: data)
+        let deletedAt: Date?
+        if let timestamp = data["deletedAt"] as? Timestamp {
+            deletedAt = timestamp.dateValue()
+        } else if let interval = data["deletedAt"] as? TimeInterval {
+            deletedAt = Date(timeIntervalSince1970: interval)
+        } else if let number = data["deletedAt"] as? NSNumber {
+            deletedAt = Date(timeIntervalSince1970: number.doubleValue)
+        } else {
+            deletedAt = nil
+        }
+
+        return DeletedProfile(
+            id: documentID,
+            userId: documentID,
+            name: snapshot.name,
+            age: snapshot.age,
+            email: snapshot.email,
+            photoURL: snapshot.photoURL,
+            status: .active,
+            deletedAt: deletedAt,
+            restoredAt: nil
+        )
+    }
+
+    private static func parseRestoredDeleteFromUser(documentID: String, data: [String: Any]) -> DeletedProfile? {
+        let restoredAt: Date?
+        if let timestamp = data["lastAccountRestoredAt"] as? Timestamp {
+            restoredAt = timestamp.dateValue()
+        } else if let interval = data["lastAccountRestoredAt"] as? TimeInterval {
+            restoredAt = Date(timeIntervalSince1970: interval)
+        } else {
+            return nil
+        }
+
+        let deletedAt: Date?
+        if let timestamp = data["lastDeletedAt"] as? Timestamp {
+            deletedAt = timestamp.dateValue()
+        } else if let interval = data["lastDeletedAt"] as? TimeInterval {
+            deletedAt = Date(timeIntervalSince1970: interval)
+        } else if let number = data["lastDeletedAt"] as? NSNumber {
+            deletedAt = Date(timeIntervalSince1970: number.doubleValue)
+        } else {
+            deletedAt = nil
+        }
+
+        let snapshot = freezeUserSnapshot(from: data)
+        return DeletedProfile(
+            id: "restored-\(documentID)",
+            userId: documentID,
+            name: snapshot.name,
+            age: snapshot.age,
+            email: snapshot.email,
+            photoURL: snapshot.photoURL,
+            status: .restored,
+            deletedAt: deletedAt,
+            restoredAt: restoredAt
+        )
+    }
+
     private func resolveAdminUserIdentities(userIds: [String]) async throws -> AdminAuthIdentityLookup {
         let uniqueIds = Array(Set(userIds.filter { !$0.isEmpty }))
         guard !uniqueIds.isEmpty else { return AdminAuthIdentityLookup() }
@@ -2916,8 +3063,15 @@ class FirebaseAuthService: ObservableObject {
         }
 
         let typeString = (data["type"] as? String ?? "text").lowercased()
-        let type = MessageType(rawValue: typeString) ?? .text
+        var type = MessageType(rawValue: typeString) ?? .text
+        // Older / mis-tagged docs may store a video URL as plain text.
+        if type == .text, Self.looksLikeVideoMessageURL(content) {
+            type = .video
+        }
         let voiceDuration = timeIntervalValue(data["voiceDuration"])
+        let thumbnailURL = (data["thumbnailURL"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let videoDuration = timeIntervalValue(data["videoDuration"])
 
         return AdminConversationMessage(
             id: (data["id"] as? String) ?? documentID,
@@ -2925,20 +3079,34 @@ class FirebaseAuthService: ObservableObject {
             type: type,
             isFromSubject: isFromSubject,
             createdAt: Date(timeIntervalSince1970: createdAt),
-            voiceDuration: voiceDuration
+            voiceDuration: voiceDuration,
+            thumbnailURL: (thumbnailURL?.isEmpty == false) ? thumbnailURL : nil,
+            videoDuration: videoDuration
         )
     }
 
+    private static func looksLikeVideoMessageURL(_ content: String) -> Bool {
+        let lower = content.lowercased()
+        guard lower.hasPrefix("http"), lower.contains("firebasestorage") else { return false }
+        return lower.contains("message_videos") || lower.contains(".mp4")
+    }
+
     private static func adminMessagePreview(from data: [String: Any]) -> String {
-        let type = (data["type"] as? String ?? "text").lowercased()
+        let rawType = (data["type"] as? String ?? "text").lowercased()
+        let content = (data["content"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let type: String = {
+            if rawType == "video" || looksLikeVideoMessageURL(content) { return "video" }
+            return rawType
+        }()
         switch type {
         case "image":
             return "📷 Image"
         case "voice", "audio":
             return "🎤 Voice message"
+        case "video":
+            return "🎬 Video"
         default:
-            let content = (data["content"] as? String)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             return content.isEmpty ? "—" : content
         }
     }

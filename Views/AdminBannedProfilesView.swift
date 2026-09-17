@@ -256,10 +256,8 @@ private enum BannedActionConfirmation: Identifiable {
 private struct AdminBannedProfileRow: View {
     let profile: BannedProfile
 
-    private var rowBackground: Color {
-        profile.isCurrentlyBanned
-            ? Color.red.opacity(0.14)
-            : Color.green.opacity(0.12)
+    private var statusColor: Color {
+        profile.isCurrentlyBanned ? .red : .green
     }
 
     var body: some View {
@@ -271,7 +269,7 @@ private struct AdminBannedProfileRow: View {
                     .foregroundColor(SpectRoomTheme.text)
                 Text(profile.status.localizationKey.localized)
                     .font(.caption.weight(.semibold))
-                    .foregroundColor(SpectRoomTheme.secondaryText)
+                    .foregroundColor(statusColor)
                 if let bannedAt = profile.bannedAt {
                     Text(String(
                         format: "admin.banned.since".localized,
@@ -296,7 +294,7 @@ private struct AdminBannedProfileRow: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 16)
-        .background(rowBackground)
+        .background(SpectRoomTheme.card)
         .cornerRadius(12)
         .contentShape(Rectangle())
     }

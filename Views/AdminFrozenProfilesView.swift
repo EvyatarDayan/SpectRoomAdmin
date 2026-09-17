@@ -322,15 +322,13 @@ private enum FrozenActionConfirmation: Identifiable {
 private struct AdminFrozenProfileRow: View {
     let profile: FrozenProfile
 
-    private var rowBackground: Color {
-        if profile.isCurrentlyFrozen {
-            return Color.blue.opacity(0.12)
-        }
+    private var statusColor: Color {
+        if profile.isCurrentlyFrozen { return .blue }
         switch profile.status {
-        case .lifted: return Color.green.opacity(0.12)
-        case .expired: return Color.orange.opacity(0.12)
-        case .banned: return Color.red.opacity(0.12)
-        case .active: return Color.gray.opacity(0.12)
+        case .lifted: return .green
+        case .expired: return .orange
+        case .banned: return .red
+        case .active: return .blue
         }
     }
 
@@ -343,7 +341,7 @@ private struct AdminFrozenProfileRow: View {
                     .foregroundColor(SpectRoomTheme.text)
                 Text(profile.status.localizationKey.localized)
                     .font(.caption.weight(.semibold))
-                    .foregroundColor(SpectRoomTheme.secondaryText)
+                    .foregroundColor(statusColor)
                 if profile.isCurrentlyFrozen {
                     Text(String(format: "admin.frozen.until".localized, profile.unlockLabel))
                         .font(.caption)
@@ -371,7 +369,7 @@ private struct AdminFrozenProfileRow: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 16)
-        .background(rowBackground)
+        .background(SpectRoomTheme.card)
         .cornerRadius(12)
         .contentShape(Rectangle())
     }

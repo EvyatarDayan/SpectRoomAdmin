@@ -253,10 +253,14 @@ private struct AdminReportRow: View {
 
     private var isPending: Bool { report.status.lowercased() == "pending" }
 
-    private var rowBackground: Color {
-        isPending
-            ? Color.red.opacity(0.14)
-            : Color.green.opacity(0.14)
+    private var statusColor: Color {
+        switch report.status.lowercased() {
+        case "pending": return .orange
+        case "actioned": return .red
+        case "dismissed": return SpectRoomTheme.secondaryText
+        case "reviewed": return .blue
+        default: return SpectRoomTheme.secondaryText
+        }
     }
 
     var body: some View {
@@ -269,9 +273,16 @@ private struct AdminReportRow: View {
                 Text(report.category)
                     .font(.caption)
                     .foregroundColor(SpectRoomTheme.secondaryText)
-                Text(statusAndDate)
-                    .font(.caption)
-                    .foregroundColor(SpectRoomTheme.secondaryText)
+                HStack(spacing: 0) {
+                    Text(localizedStatus(report.status))
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(statusColor)
+                    if let createdAt = report.createdAt {
+                        Text(" · \(createdAt.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption)
+                            .foregroundColor(SpectRoomTheme.secondaryText)
+                    }
+                }
             }
             Spacer()
             Image(systemName: "chevron.right")
@@ -280,17 +291,9 @@ private struct AdminReportRow: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 16)
-        .background(rowBackground)
+        .background(SpectRoomTheme.card)
         .cornerRadius(12)
         .contentShape(Rectangle())
-    }
-
-    private var statusAndDate: String {
-        let status = localizedStatus(report.status)
-        if let createdAt = report.createdAt {
-            return "\(status) · \(createdAt.formatted(date: .abbreviated, time: .shortened))"
-        }
-        return status
     }
 
     private func localizedStatus(_ status: String) -> String {

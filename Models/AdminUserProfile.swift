@@ -111,6 +111,31 @@ struct AdminUserProfile: Identifiable, Equatable {
         )
     }
 
+    func applyingDeleted() -> AdminUserProfile {
+        AdminUserProfile(
+            id: id,
+            name: name,
+            age: age,
+            email: email,
+            bio: bio,
+            photoURL: photoURL,
+            photos: photos,
+            gender: gender,
+            interests: interests,
+            interestedIn: interestedIn,
+            lookingFor: lookingFor,
+            locationDisplay: locationDisplay,
+            isOnline: false,
+            lastSeen: lastSeen,
+            isBanned: isBanned,
+            isFrozen: false,
+            frozenUntil: nil,
+            isDeleted: true,
+            isIncomplete: isIncomplete,
+            createdAt: createdAt
+        )
+    }
+
     func withName(_ name: String) -> AdminUserProfile {
         AdminUserProfile(
             id: id,
@@ -230,6 +255,9 @@ struct AdminConversationMessage: Identifiable, Equatable {
     let isFromSubject: Bool
     let createdAt: Date
     let voiceDuration: TimeInterval?
+    /// Remote thumbnail for video messages (`thumbnailURL` in Firestore).
+    let thumbnailURL: String?
+    let videoDuration: TimeInterval?
 }
 
 enum AdminProfileHistoryKind: String, Equatable {
