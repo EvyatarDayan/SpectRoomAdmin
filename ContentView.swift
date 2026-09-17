@@ -51,9 +51,13 @@ struct ContentView: View {
         }
         .onAppear {
             appState.setMessagesTabActive(false)
+            applyRequestedAdminTabIfNeeded()
         }
         .onChange(of: selectedTab) { _ in
             appState.setMessagesTabActive(false)
+        }
+        .onChange(of: appState.requestedAdminTab) { _ in
+            applyRequestedAdminTabIfNeeded()
         }
         .sheet(isPresented: Binding(
             get: { appState.showingNewMessageNotification && !appState.newMessageSenderName.isEmpty },
@@ -71,6 +75,12 @@ struct ContentView: View {
             )
             .presentationBackground(.clear)
         }
+    }
+
+    private func applyRequestedAdminTabIfNeeded() {
+        guard let tab = appState.requestedAdminTab else { return }
+        selectedTab = tab
+        appState.requestedAdminTab = nil
     }
 }
 
@@ -128,6 +138,10 @@ struct CustomFooterMenu: View {
                 VStack(spacing: 3) {
                     Image(systemName: "shield.fill")
                         .font(.system(size: 20))
+                        .overlay(alignment: .topTrailing) {
+                            UnreadCountBadge(count: appState.unseenAdminReportCount)
+                                .offset(x: 10, y: -8)
+                        }
                     Text("nav.admin".localized)
                         .font(.system(size: 11))
                 }

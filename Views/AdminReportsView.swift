@@ -3,6 +3,7 @@ import SwiftUI
 struct AdminReportsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var appState: AppStateManager
     @State private var reports: [UserReport] = []
     @State private var isLoading = true
     @State private var selectedReport: UserReport?
@@ -45,6 +46,7 @@ struct AdminReportsView: View {
                         List(filteredReports) { report in
                             Button {
                                 selectedReport = report
+                                appState.markAdminReportAsSeen(report.id)
                             } label: {
                                 AdminReportRow(report: report)
                             }
@@ -64,7 +66,9 @@ struct AdminReportsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("common.done".localized) { dismiss() }
+                    Button("common.done".localized) {
+                        handleDoneTapped()
+                    }
                 }
             }
             .overlay {
@@ -102,6 +106,11 @@ struct AdminReportsView: View {
                         report: selectedReport,
                         isPerformingAction: isPerformingAction,
                         onClose: { self.selectedReport = nil },
+                        onOpenProfileSearch: { email in
+                            self.selectedReport = nil
+                            appState.openAllProfilesSearch(email)
+                            dismiss()
+                        },
                         onSubmit: { action in
                             handleSelectedAction(action, for: selectedReport)
                         }
@@ -118,6 +127,18 @@ struct AdminReportsView: View {
             }
             .task { await loadReports() }
         }
+    }
+
+    private func handleDoneTapped() {
+        if pendingModerationStep != nil {
+            pendingModerationStep = nil
+            return
+        }
+        if selectedReport != nil {
+            selectedReport = nil
+            return
+        }
+        dismiss()
     }
 
     private var emptyState: some View {
@@ -337,6 +358,7 @@ private struct AdminReportDetailOverlay: View {
     let report: UserReport
     let isPerformingAction: Bool
     let onClose: () -> Void
+    let onOpenProfileSearch: (String) -> Void
     let onSubmit: (AdminReportSelectedAction) -> Void
 
     @Environment(\.colorScheme) private var colorScheme
@@ -359,26 +381,41 @@ private struct AdminReportDetailOverlay: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    HStack(alignment: .top, spacing: 12) {
-                        profilePhoto
+                    VStack(spacing: 12) {
+                        HStack(spacing: 12) {
+                            avatarPhoto(urlString: report.reporterPhotoURL, name: report.displayReporterName)
+                            Image(systemName: "arrow.right")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundColor(secondaryText)
+                            avatarPhoto(urlString: report.primaryPhotoURL, name: report.reportedName)
+                        }
+
                         Text(headlineText)
                             .font(.system(size: 20, weight: .bold))
                             .foregroundColor(primaryText)
-                            .multilineTextAlignment(.leading)
+                            .multilineTextAlignment(.center)
                             .lineLimit(nil)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                    .frame(maxWidth: .infinity)
+
+                    Divider()
+                        .background(secondaryText.opacity(0.35))
+
+                    emailLinkRow(
+                        title: "admin.reports.detail.reporting.user".localized,
+                        email: report.reporterEmail
+                    )
+                    emailLinkRow(
+                        title: "admin.reports.detail.reported.user".localized,
+                        email: report.reportedEmail
+                    )
 
                     detailRow(title: "settings.reported.profiles.detail.category".localized, value: report.category)
 
                     if let details = report.details?.trimmingCharacters(in: .whitespacesAndNewlines), !details.isEmpty {
                         detailRow(title: "settings.reported.profiles.detail.details".localized, value: details)
                     }
-
-                    detailRow(
-                        title: "settings.reported.profiles.detail.status".localized,
-                        value: localizedStatus(report.status)
-                    )
 
                     VStack(spacing: 10) {
                         if isPending {
@@ -439,30 +476,11 @@ private struct AdminReportDetailOverlay: View {
     }
 
     private var headlineText: String {
-        if let createdAt = report.createdAt {
-            let formattedDate = createdAt.formatted(
-                Date.FormatStyle().day().month(.abbreviated).year().hour().minute()
-            )
-            return String(
-                format: "settings.reported.profiles.detail.headline".localized,
-                report.reportedName,
-                formattedDate
-            )
-        }
-        return String(
-            format: "settings.reported.profiles.detail.headline.no.date".localized,
+        String(
+            format: "admin.reports.detail.headline.reporting".localized,
+            report.displayReporterName,
             report.reportedName
         )
-    }
-
-    private func localizedStatus(_ status: String) -> String {
-        switch status.lowercased() {
-        case "pending": return "settings.reported.profiles.status.pending".localized
-        case "reviewed": return "settings.reported.profiles.status.reviewed".localized
-        case "dismissed": return "settings.reported.profiles.status.dismissed".localized
-        case "actioned": return "settings.reported.profiles.status.actioned".localized
-        default: return status.capitalized
-        }
     }
 
     private func detailRow(title: String, value: String) -> some View {
@@ -474,6 +492,36 @@ private struct AdminReportDetailOverlay: View {
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundColor(primaryText)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func emailLinkRow(title: String, email: String?) -> some View {
+        let trimmed = email?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let hasEmail = !trimmed.isEmpty
+
+        return VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(secondaryText)
+
+            if hasEmail {
+                Button {
+                    onOpenProfileSearch(trimmed)
+                } label: {
+                    Text(trimmed)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.blue)
+                        .underline()
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Text("admin.reports.detail.email.unavailable".localized)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(secondaryText)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -516,27 +564,27 @@ private struct AdminReportDetailOverlay: View {
         .buttonStyle(.plain)
     }
 
-    private var profilePhoto: some View {
+    private func avatarPhoto(urlString: String?, name: String) -> some View {
         Group {
-            if let photoURL = report.primaryPhotoURL, let url = URL(string: photoURL) {
+            if let urlString, let url = URL(string: urlString) {
                 CachedAsyncImage(url: url) { image in
                     image.resizable().aspectRatio(contentMode: .fill)
                 } placeholder: {
-                    initialsPlaceholder
+                    initialsPlaceholder(for: name)
                 }
             } else {
-                initialsPlaceholder
+                initialsPlaceholder(for: name)
             }
         }
         .frame(width: 52, height: 52)
         .clipShape(Circle())
     }
 
-    private var initialsPlaceholder: some View {
+    private func initialsPlaceholder(for name: String) -> some View {
         Circle()
             .fill(Color.orange.opacity(0.2))
             .overlay(
-                Text(String(report.reportedName.prefix(1)).uppercased())
+                Text(String(name.prefix(1)).uppercased())
                     .font(.title3.weight(.semibold))
                     .foregroundColor(.orange)
             )

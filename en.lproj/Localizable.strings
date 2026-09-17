@@ -142,6 +142,12 @@
 "settings.reported.profiles.detail.details" = "Report Details";
 "settings.reported.profiles.detail.status" = "Status";
 "settings.reported.profiles.detail.bio" = "Bio at time of report";
+"admin.reports.detail.reported.email" = "Reported email";
+"admin.reports.detail.reporter.email" = "Reporter email";
+"admin.reports.detail.reporting.user" = "Reporting user";
+"admin.reports.detail.reported.user" = "Reported user";
+"admin.reports.detail.headline.reporting" = "%@ reporting %@";
+"admin.reports.detail.email.unavailable" = "Not available";
 "settings.reported.profiles.status.pending" = "Pending";
 "settings.reported.profiles.status.reviewed" = "Reviewed";
 "settings.reported.profiles.status.dismissed" = "Dismissed";
@@ -766,6 +772,9 @@
 "messages.video.saved" = "Video Saved";
 "messages.video.saved.success" = "Video saved to your photo library";
 "messages.video.saved.failed" = "Failed to save video";
+"messages.voice.saved" = "Voice Saved";
+"messages.voice.saved.success" = "Voice message ready to share";
+"messages.voice.saved.failed" = "Failed to save voice message";
 "common.edit" = "Edit";
 "common.delete" = "Delete";
 "common.loading" = "Loading...";

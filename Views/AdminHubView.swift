@@ -35,6 +35,7 @@ struct AdminHubView: View {
             }
             .sheet(isPresented: $showingAdminReports) {
                 AdminReportsView()
+                    .environmentObject(appState)
                     .interactiveDismissDisabled(true)
             }
             .sheet(isPresented: $showingAdminFrozenProfiles) {
@@ -59,7 +60,8 @@ struct AdminHubView: View {
                 title: "admin.reports.button.title".localized,
                 subtitle: "admin.reports.button.subtitle".localized,
                 systemImage: "shield.fill",
-                iconColor: .orange
+                iconColor: .orange,
+                badgeCount: appState.unseenAdminReportCount
             ) {
                 showingAdminReports = true
             }
@@ -118,6 +120,7 @@ struct AdminHubView: View {
         subtitle: String,
         systemImage: String,
         iconColor: Color,
+        badgeCount: Int = 0,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
@@ -128,6 +131,10 @@ struct AdminHubView: View {
                     .frame(width: 44, height: 44)
                     .background(iconColor.opacity(0.14))
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(alignment: .topTrailing) {
+                        UnreadCountBadge(count: badgeCount)
+                            .offset(x: 6, y: -6)
+                    }
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title)

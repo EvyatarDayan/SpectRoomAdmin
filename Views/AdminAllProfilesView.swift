@@ -117,7 +117,11 @@ struct AdminAllProfilesView: View {
                     isLoading = false
                     return
                 }
+                applyPendingProfilesSearchIfNeeded()
                 await loadInitial()
+            }
+            .onChange(of: appState.pendingProfilesSearchQuery) { _, _ in
+                applyPendingProfilesSearchIfNeeded()
             }
             .onChange(of: searchText) { _, _ in
                 searchTask?.cancel()
@@ -413,6 +417,14 @@ struct AdminAllProfilesView: View {
         } catch {
             print("⚠️ Failed fetching admin users total count: \(error.localizedDescription)")
         }
+    }
+
+    private func applyPendingProfilesSearchIfNeeded() {
+        guard let pending = appState.pendingProfilesSearchQuery?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !pending.isEmpty else { return }
+        appState.pendingProfilesSearchQuery = nil
+        selectedStatusFilter = nil
+        searchText = pending
     }
 
     @MainActor
@@ -1880,6 +1892,19 @@ private struct AdminConversationMediaViewerOverlay: View {
     @Binding var selectedIndex: Int
     let onDismiss: () -> Void
 
+    @State private var isSaving = false
+    @State private var showingSaveAlert = false
+    @State private var saveAlertTitle = ""
+    @State private var saveAlertMessage = ""
+    @State private var showingVoiceShareSheet = false
+    @State private var voiceShareURL: URL?
+
+    private var currentItem: AdminConversationMediaItem? {
+        guard !mediaItems.isEmpty else { return nil }
+        let index = min(max(selectedIndex, 0), mediaItems.count - 1)
+        return mediaItems[index]
+    }
+
     var body: some View {
         ZStack {
             Color.black.opacity(0.92)
@@ -1893,12 +1918,17 @@ private struct AdminConversationMediaViewerOverlay: View {
                             .foregroundColor(.white)
                     }
                     .buttonStyle(.plain)
+
                     Spacer()
-                    if !mediaItems.isEmpty {
-                        Text("\(selectedIndex + 1)/\(mediaItems.count)")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundColor(.white.opacity(0.85))
+
+                    Button("common.save".localized) {
+                        saveCurrentMedia()
                     }
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .buttonStyle(.plain)
+                    .disabled(isSaving || currentItem == nil)
+                    .opacity(isSaving || currentItem == nil ? 0.5 : 1)
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 16)
@@ -1912,6 +1942,36 @@ private struct AdminConversationMediaViewerOverlay: View {
                 }
                 .tabViewStyle(.page(indexDisplayMode: .automatic))
                 .indexViewStyle(.page(backgroundDisplayMode: .always))
+
+                if !mediaItems.isEmpty {
+                    Text("\(min(max(selectedIndex, 0), mediaItems.count - 1) + 1)/\(mediaItems.count)")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(.white.opacity(0.85))
+                        .padding(.top, 8)
+                        .padding(.bottom, 20)
+                }
+            }
+
+            if isSaving {
+                ProgressView()
+                    .tint(.white)
+                    .padding(16)
+                    .background(Circle().fill(Color.black.opacity(0.45)))
+            }
+        }
+        .alert(saveAlertTitle, isPresented: $showingSaveAlert) {
+            Button("common.ok".localized) { }
+        } message: {
+            Text(saveAlertMessage)
+        }
+        .sheet(isPresented: $showingVoiceShareSheet, onDismiss: {
+            if let voiceShareURL {
+                try? FileManager.default.removeItem(at: voiceShareURL)
+            }
+            voiceShareURL = nil
+        }) {
+            if let voiceShareURL {
+                ActivityShareSheet(items: [voiceShareURL])
             }
         }
     }
@@ -1953,6 +2013,227 @@ private struct AdminConversationMediaViewerOverlay: View {
                 .frame(maxWidth: 280)
             }
             .padding(.horizontal, 24)
+        }
+    }
+
+    private func saveCurrentMedia() {
+        guard let item = currentItem, !isSaving else { return }
+        if item.isImage {
+            saveImage(from: item.message.content)
+        } else if item.isVideo {
+            saveVideo(from: item.message.content)
+        } else {
+            saveVoice(from: item.message.content)
+        }
+    }
+
+    private func presentSaveResult(success: Bool, titleKey: String, successKey: String, failureKey: String) {
+        saveAlertTitle = titleKey.localized
+        saveAlertMessage = (success ? successKey : failureKey).localized
+        showingSaveAlert = true
+    }
+
+    private func requestPhotoLibraryAccess() async -> Bool {
+        var status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+        if status == .notDetermined {
+            status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        }
+        return status == .authorized || status == .limited
+    }
+
+    private func saveImage(from content: String) {
+        guard let url = URL(string: content) else {
+            presentSaveResult(
+                success: false,
+                titleKey: "messages.image.saved",
+                successKey: "messages.image.saved.success",
+                failureKey: "messages.image.saved.failed"
+            )
+            return
+        }
+
+        isSaving = true
+        Task {
+            do {
+                guard await requestPhotoLibraryAccess() else {
+                    await MainActor.run {
+                        isSaving = false
+                        presentSaveResult(
+                            success: false,
+                            titleKey: "messages.image.saved",
+                            successKey: "messages.image.saved.success",
+                            failureKey: "messages.image.saved.failed"
+                        )
+                    }
+                    return
+                }
+
+                let (data, _) = try await URLSession.shared.data(from: url)
+                guard let image = UIImage(data: data) else {
+                    throw NSError(domain: "AdminMediaSave", code: 1)
+                }
+
+                try await PHPhotoLibrary.shared().performChanges {
+                    PHAssetChangeRequest.creationRequestForAsset(from: image)
+                }
+
+                await MainActor.run {
+                    isSaving = false
+                    presentSaveResult(
+                        success: true,
+                        titleKey: "messages.image.saved",
+                        successKey: "messages.image.saved.success",
+                        failureKey: "messages.image.saved.failed"
+                    )
+                }
+            } catch {
+                print("❌ Error saving admin image: \(error.localizedDescription)")
+                await MainActor.run {
+                    isSaving = false
+                    presentSaveResult(
+                        success: false,
+                        titleKey: "messages.image.saved",
+                        successKey: "messages.image.saved.success",
+                        failureKey: "messages.image.saved.failed"
+                    )
+                }
+            }
+        }
+    }
+
+    private func saveVideo(from content: String) {
+        guard let url = URL(string: content) else {
+            presentSaveResult(
+                success: false,
+                titleKey: "messages.video.saved",
+                successKey: "messages.video.saved.success",
+                failureKey: "messages.video.saved.failed"
+            )
+            return
+        }
+
+        isSaving = true
+        Task {
+            do {
+                guard await requestPhotoLibraryAccess() else {
+                    await MainActor.run {
+                        isSaving = false
+                        presentSaveResult(
+                            success: false,
+                            titleKey: "messages.video.saved",
+                            successKey: "messages.video.saved.success",
+                            failureKey: "messages.video.saved.failed"
+                        )
+                    }
+                    return
+                }
+
+                let localURL: URL
+                if url.isFileURL {
+                    localURL = url
+                } else {
+                    let (tempURL, response) = try await URLSession.shared.download(from: url)
+                    let ext: String = {
+                        if let http = response as? HTTPURLResponse,
+                           let mime = http.mimeType?.lowercased() {
+                            if mime.contains("quicktime") { return "mov" }
+                            if mime.contains("webm") { return "webm" }
+                        }
+                        let pathExt = url.pathExtension.lowercased()
+                        return pathExt.isEmpty ? "mp4" : pathExt
+                    }()
+                    let dest = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("admin_media_video_save_\(UUID().uuidString).\(ext)")
+                    try? FileManager.default.removeItem(at: dest)
+                    try FileManager.default.moveItem(at: tempURL, to: dest)
+                    localURL = dest
+                }
+
+                try await PHPhotoLibrary.shared().performChanges {
+                    PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: localURL)
+                }
+
+                if !url.isFileURL {
+                    try? FileManager.default.removeItem(at: localURL)
+                }
+
+                await MainActor.run {
+                    isSaving = false
+                    presentSaveResult(
+                        success: true,
+                        titleKey: "messages.video.saved",
+                        successKey: "messages.video.saved.success",
+                        failureKey: "messages.video.saved.failed"
+                    )
+                }
+            } catch {
+                print("❌ Error saving admin video: \(error.localizedDescription)")
+                await MainActor.run {
+                    isSaving = false
+                    presentSaveResult(
+                        success: false,
+                        titleKey: "messages.video.saved",
+                        successKey: "messages.video.saved.success",
+                        failureKey: "messages.video.saved.failed"
+                    )
+                }
+            }
+        }
+    }
+
+    private func saveVoice(from content: String) {
+        guard let url = URL(string: content) else {
+            presentSaveResult(
+                success: false,
+                titleKey: "messages.voice.saved",
+                successKey: "messages.voice.saved.success",
+                failureKey: "messages.voice.saved.failed"
+            )
+            return
+        }
+
+        isSaving = true
+        Task {
+            do {
+                let localURL: URL
+                if url.isFileURL {
+                    localURL = url
+                } else {
+                    let (tempURL, response) = try await URLSession.shared.download(from: url)
+                    let ext: String = {
+                        if let http = response as? HTTPURLResponse,
+                           let mime = http.mimeType?.lowercased() {
+                            if mime.contains("mpeg") || mime.contains("mp3") { return "mp3" }
+                            if mime.contains("wav") { return "wav" }
+                            if mime.contains("aac") { return "aac" }
+                        }
+                        let pathExt = url.pathExtension.lowercased()
+                        return pathExt.isEmpty ? "m4a" : pathExt
+                    }()
+                    let dest = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("admin_voice_save_\(UUID().uuidString).\(ext)")
+                    try? FileManager.default.removeItem(at: dest)
+                    try FileManager.default.moveItem(at: tempURL, to: dest)
+                    localURL = dest
+                }
+
+                await MainActor.run {
+                    isSaving = false
+                    voiceShareURL = localURL
+                    showingVoiceShareSheet = true
+                }
+            } catch {
+                print("❌ Error preparing admin voice save: \(error.localizedDescription)")
+                await MainActor.run {
+                    isSaving = false
+                    presentSaveResult(
+                        success: false,
+                        titleKey: "messages.voice.saved",
+                        successKey: "messages.voice.saved.success",
+                        failureKey: "messages.voice.saved.failed"
+                    )
+                }
+            }
         }
     }
 }

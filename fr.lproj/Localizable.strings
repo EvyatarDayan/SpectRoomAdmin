@@ -142,6 +142,12 @@
 "settings.reported.profiles.detail.details" = "Détails du signalement";
 "settings.reported.profiles.detail.status" = "Statut";
 "settings.reported.profiles.detail.bio" = "Bio au moment du signalement";
+"admin.reports.detail.reported.email" = "E-mail signalé";
+"admin.reports.detail.reporter.email" = "E-mail du signalant";
+"admin.reports.detail.reporting.user" = "Utilisateur signalant";
+"admin.reports.detail.reported.user" = "Utilisateur signalé";
+"admin.reports.detail.headline.reporting" = "%@ signale %@";
+"admin.reports.detail.email.unavailable" = "Non disponible";
 "settings.reported.profiles.status.pending" = "En attente";
 "settings.reported.profiles.status.reviewed" = "Examiné";
 "settings.reported.profiles.status.dismissed" = "Rejeté";
@@ -771,6 +777,9 @@
 "messages.video.saved" = "Vidéo enregistrée";
 "messages.video.saved.success" = "Vidéo enregistrée dans votre photothèque";
 "messages.video.saved.failed" = "Échec de l’enregistrement de la vidéo";
+"messages.voice.saved" = "Message vocal enregistré";
+"messages.voice.saved.success" = "Message vocal prêt à partager";
+"messages.voice.saved.failed" = "Échec de l’enregistrement du message vocal";
 "common.edit" = "Modifier";
 "common.delete" = "Supprimer";
 "common.loading" = "Chargement...";

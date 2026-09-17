@@ -47,6 +47,15 @@ class AppStateManager: ObservableObject {
     @Published private(set) var suppressedBlockedAlertUserIds: Set<String> = []
     @Published var authErrorMessage: String?
     @Published var pendingModerationNotice: ModerationNotice?
+    /// Switch footer tab from nested sheets (e.g. report email → All Profiles).
+    @Published var requestedAdminTab: Int?
+    /// Prefill All Profiles search after navigating from another admin screen.
+    @Published var pendingProfilesSearchQuery: String?
+    /// Pending reports the admin has not opened yet (Restrict / reports badge).
+    @Published var unseenAdminReportCount: Int = 0
+    private var pendingAdminReportIds: Set<String> = []
+    private var seenAdminReportIds: Set<String> = []
+    private let seenAdminReportsStorageKeyPrefix = "admin.seenReportIds."
     private var lastMatchesUpdate: Date?
     private var lastMessageConversationsUpdate: Date?
     
@@ -140,6 +149,7 @@ class AppStateManager: ObservableObject {
                     self?.startListeningForNewMessages()
                     self?.startListeningForBlockedByUsers()
                     self?.startListeningForModerationStatus()
+                    self?.startListeningForPendingAdminReportsIfNeeded()
                     self?.refreshUnreadMessageCount()
                 } else {
                     // Set offline status before clearing data
@@ -148,6 +158,10 @@ class AppStateManager: ObservableObject {
                     }
                     self?.firebaseAuth.stopListeningForBlockedByUsers()
                     self?.firebaseAuth.stopListeningForModerationStatus()
+                    self?.firebaseAuth.stopListeningForPendingAdminReports()
+                    self?.pendingAdminReportIds = []
+                    self?.seenAdminReportIds = []
+                    self?.unseenAdminReportCount = 0
                     // Keep login-blocked freeze notice so the user can still dismiss it after sign-out.
                     if case .loginBlocked = self?.pendingModerationNotice?.kind {
                         // leave notice
@@ -183,12 +197,17 @@ class AppStateManager: ObservableObject {
                     self?.blockedByUsers = user.blockedByUsers
                     self?.loadSuppressedBlockedAlerts()
                     self?.syncInitialProfileCompletionIfNeeded()
+                    self?.startListeningForPendingAdminReportsIfNeeded()
                 } else {
                     self?.blockedUsers = []
                     self?.blockedByUsers = []
                     self?.discoverProfilesHeldByBlock = [:]
                     self?.pendingDiscoverUnblockRestoreUserId = nil
                     self?.suppressedBlockedAlertUserIds = []
+                    self?.firebaseAuth.stopListeningForPendingAdminReports()
+                    self?.pendingAdminReportIds = []
+                    self?.seenAdminReportIds = []
+                    self?.unseenAdminReportCount = 0
                 }
             }
             .store(in: &cancellables)
@@ -922,6 +941,15 @@ class AppStateManager: ObservableObject {
         await refreshPendingModerationNotice()
     }
 
+    /// Open All Profiles with search prefilled (e.g. from a report email link).
+    @MainActor
+    func openAllProfilesSearch(_ query: String) {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        pendingProfilesSearchQuery = trimmed
+        requestedAdminTab = AdminTab.profiles.rawValue
+    }
+
     private var isDismissingModerationNotice = false
 
     @MainActor
@@ -1001,6 +1029,61 @@ class AppStateManager: ObservableObject {
 
     var isAdminUser: Bool {
         AdminAccess.isAdmin(email: currentUser?.email ?? firebaseAuth.auth.currentUser?.email)
+    }
+
+    func startListeningForPendingAdminReportsIfNeeded() {
+        guard isAuthenticated, isAdminUser else {
+            firebaseAuth.stopListeningForPendingAdminReports()
+            pendingAdminReportIds = []
+            unseenAdminReportCount = 0
+            return
+        }
+
+        loadSeenAdminReportIds()
+        firebaseAuth.startListeningForPendingAdminReports { [weak self] pendingIds in
+            guard let self else { return }
+            self.pendingAdminReportIds = Set(pendingIds)
+            self.pruneSeenAdminReportIds()
+            self.refreshUnseenAdminReportCount()
+        }
+    }
+
+    /// Mark a report as opened so the Restrict/reports badge decrements.
+    func markAdminReportAsSeen(_ reportId: String) {
+        let trimmed = reportId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !seenAdminReportIds.contains(trimmed) else { return }
+        seenAdminReportIds.insert(trimmed)
+        persistSeenAdminReportIds()
+        refreshUnseenAdminReportCount()
+    }
+
+    private func refreshUnseenAdminReportCount() {
+        unseenAdminReportCount = pendingAdminReportIds.subtracting(seenAdminReportIds).count
+    }
+
+    private func seenAdminReportsStorageKey() -> String? {
+        guard let uid = firebaseAuth.auth.currentUser?.uid, !uid.isEmpty else { return nil }
+        return seenAdminReportsStorageKeyPrefix + uid
+    }
+
+    private func loadSeenAdminReportIds() {
+        guard let key = seenAdminReportsStorageKey() else {
+            seenAdminReportIds = []
+            return
+        }
+        seenAdminReportIds = Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
+    }
+
+    private func persistSeenAdminReportIds() {
+        guard let key = seenAdminReportsStorageKey() else { return }
+        UserDefaults.standard.set(Array(seenAdminReportIds), forKey: key)
+    }
+
+    private func pruneSeenAdminReportIds() {
+        let pruned = seenAdminReportIds.intersection(pendingAdminReportIds)
+        guard pruned.count != seenAdminReportIds.count else { return }
+        seenAdminReportIds = pruned
+        persistSeenAdminReportIds()
     }
     
     @MainActor

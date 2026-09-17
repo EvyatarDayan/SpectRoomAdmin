@@ -142,6 +142,12 @@
 "settings.reported.profiles.detail.details" = "Meldungsdetails";
 "settings.reported.profiles.detail.status" = "Status";
 "settings.reported.profiles.detail.bio" = "Bio zum Zeitpunkt der Meldung";
+"admin.reports.detail.reported.email" = "E-Mail der gemeldeten Person";
+"admin.reports.detail.reporter.email" = "E-Mail des Meldenden";
+"admin.reports.detail.reporting.user" = "Meldende Person";
+"admin.reports.detail.reported.user" = "Gemeldete Person";
+"admin.reports.detail.headline.reporting" = "%@ meldet %@";
+"admin.reports.detail.email.unavailable" = "Nicht verfügbar";
 "settings.reported.profiles.status.pending" = "Ausstehend";
 "settings.reported.profiles.status.reviewed" = "Geprüft";
 "settings.reported.profiles.status.dismissed" = "Abgelehnt";
@@ -771,6 +777,9 @@
 "messages.video.saved" = "Video gespeichert";
 "messages.video.saved.success" = "Video in deiner Mediathek gespeichert";
 "messages.video.saved.failed" = "Video konnte nicht gespeichert werden";
+"messages.voice.saved" = "Sprachnachricht gespeichert";
+"messages.voice.saved.success" = "Sprachnachricht bereit zum Teilen";
+"messages.voice.saved.failed" = "Sprachnachricht konnte nicht gespeichert werden";
 "common.edit" = "Bearbeiten";
 "common.delete" = "Löschen";
 "common.loading" = "Wird geladen...";

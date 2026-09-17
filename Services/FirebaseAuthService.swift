@@ -28,6 +28,7 @@ class FirebaseAuthService: ObservableObject {
     private var matchesListener: ListenerRegistration?
     private var blockedByListener: ListenerRegistration?
     private var moderationListener: ListenerRegistration?
+    private var pendingAdminReportsListener: ListenerRegistration?
     private var authStateListenerHandle: AuthStateDidChangeListenerHandle?
     /// Keeps the app on the login screen while we verify the account isn't soft-deleted.
     private var isVerifyingSignIn = false
@@ -1074,9 +1075,117 @@ class FirebaseAuthService: ObservableObject {
         let reports = snapshot.documents.compactMap { document -> UserReport? in
             Self.parseUserReport(documentID: document.documentID, data: document.data())
         }
-        return reports.sorted {
+        .sorted {
             ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast)
         }
+
+        return await enrichReportsWithUserEmails(reports)
+    }
+
+    private func enrichReportsWithUserEmails(_ reports: [UserReport]) async -> [UserReport] {
+        let userIds = Array(Set(reports.flatMap { [$0.reporterUserId, $0.reportedUserId] }))
+            .filter { !$0.isEmpty }
+        guard !userIds.isEmpty else { return reports }
+
+        var emails: [String: String] = [:]
+        var names: [String: String] = [:]
+        var photoURLs: [String: String] = [:]
+
+        // Fast path: Firestore user docs.
+        for chunk in stride(from: 0, to: userIds.count, by: 30).map({ Array(userIds[$0..<min($0 + 30, userIds.count)]) }) {
+            await withTaskGroup(of: (String, String?, String?, String?).self) { group in
+                for userId in chunk {
+                    group.addTask {
+                        do {
+                            let snap = try await self.db.collection("users").document(userId).getDocument()
+                            let data = snap.data() ?? [:]
+                            let email = (data["email"] as? String)?
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                                .lowercased()
+                            let name = (data["name"] as? String)?
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                            let profilePhoto = (data["profilePhotoURL"] as? String)?
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                            let galleryFirst = (data["photos"] as? [String])?
+                                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                                .first(where: { !$0.isEmpty })
+                            let photo = (profilePhoto?.isEmpty == false) ? profilePhoto : galleryFirst
+                            return (
+                                userId,
+                                (email?.isEmpty == false) ? email : nil,
+                                (name?.isEmpty == false) ? name : nil,
+                                photo
+                            )
+                        } catch {
+                            return (userId, nil, nil, nil)
+                        }
+                    }
+                }
+                for await (userId, email, name, photo) in group {
+                    if let email { emails[userId] = email }
+                    if let name { names[userId] = name }
+                    if let photo { photoURLs[userId] = photo }
+                }
+            }
+        }
+
+        // Fill gaps from Auth via existing admin callable.
+        let missingIds = userIds.filter { emails[$0] == nil }
+        if !missingIds.isEmpty {
+            do {
+                let lookup = try await resolveAdminUserIdentities(userIds: missingIds)
+                for (uid, email) in lookup.emails {
+                    emails[uid] = email
+                }
+                for (uid, name) in lookup.names where names[uid] == nil {
+                    names[uid] = name
+                }
+            } catch {
+                print("⚠️ enrichReportsWithUserEmails Auth lookup failed: \(error.localizedDescription)")
+            }
+        }
+
+        return reports.map { report in
+            report.withIdentities(
+                reporterEmail: emails[report.reporterUserId],
+                reportedEmail: emails[report.reportedUserId],
+                reporterName: names[report.reporterUserId],
+                reporterPhotoURL: photoURLs[report.reporterUserId]
+            )
+        }
+    }
+
+    /// Live pending report IDs for admin badge counts.
+    func startListeningForPendingAdminReports(onChange: @escaping ([String]) -> Void) {
+        guard AdminAccess.isAdmin(email: auth.currentUser?.email) else {
+            stopListeningForPendingAdminReports()
+            onChange([])
+            return
+        }
+
+        stopListeningForPendingAdminReports()
+        pendingAdminReportsListener = db.collection("reports")
+            .addSnapshotListener { snapshot, error in
+                if let error {
+                    print("⚠️ Error listening for pending admin reports: \(error.localizedDescription)")
+                    return
+                }
+                let pendingIds = (snapshot?.documents ?? []).compactMap { document -> String? in
+                    let status = (document.data()["status"] as? String ?? "pending")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .lowercased()
+                    guard status == "pending" else { return nil }
+                    return document.documentID
+                }
+                DispatchQueue.main.async {
+                    onChange(pendingIds)
+                }
+            }
+    }
+
+    func stopListeningForPendingAdminReports() {
+        pendingAdminReportsListener?.remove()
+        pendingAdminReportsListener = nil
     }
 
     struct SupportTicketsPage {
@@ -3321,6 +3430,10 @@ class FirebaseAuthService: ObservableObject {
             reporterUserId: reporterUserId,
             reportedUserId: reportedUserId,
             reportedName: (reportedName?.isEmpty == false) ? reportedName! : "Unknown",
+            reporterName: nil,
+            reporterEmail: nil,
+            reportedEmail: nil,
+            reporterPhotoURL: nil,
             category: category,
             details: details,
             status: status,

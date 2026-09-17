@@ -142,6 +142,12 @@
 "settings.reported.profiles.detail.details" = "Rapportdetaljer";
 "settings.reported.profiles.detail.status" = "Status";
 "settings.reported.profiles.detail.bio" = "Bio vid rapporteringstillfället";
+"admin.reports.detail.reported.email" = "Rapporterad e-post";
+"admin.reports.detail.reporter.email" = "Rapportörens e-post";
+"admin.reports.detail.reporting.user" = "Rapporterande användare";
+"admin.reports.detail.reported.user" = "Rapporterad användare";
+"admin.reports.detail.headline.reporting" = "%@ rapporterar %@";
+"admin.reports.detail.email.unavailable" = "Inte tillgänglig";
 "settings.reported.profiles.status.pending" = "Väntande";
 "settings.reported.profiles.status.reviewed" = "Granskad";
 "settings.reported.profiles.status.dismissed" = "Avvisad";
@@ -771,6 +777,9 @@
 "messages.video.saved" = "Video sparad";
 "messages.video.saved.success" = "Videon sparades i ditt fotobibliotek";
 "messages.video.saved.failed" = "Kunde inte spara videon";
+"messages.voice.saved" = "Röstmeddelande sparat";
+"messages.voice.saved.success" = "Röstmeddelande redo att delas";
+"messages.voice.saved.failed" = "Kunde inte spara röstmeddelandet";
 "common.edit" = "Redigera";
 "common.delete" = "Radera";
 "common.loading" = "Laddar...";
