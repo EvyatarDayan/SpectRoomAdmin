@@ -275,6 +275,10 @@ class FirebaseAuthService: ObservableObject {
         try await db.collection("users").document(user.uid).setData([
             "isDeleted": true,
             "deletedAt": now,
+            "deletedBy": "user",
+            "lastDeletedBy": "user",
+            "deletedByAdmin": false,
+            "lastDeletedByAdmin": false,
             "scheduledHardDeleteAt": hardDeleteAt,
             "isOnline": false,
             "fcmToken": FieldValue.delete()
@@ -2750,6 +2754,7 @@ class FirebaseAuthService: ObservableObject {
     }
 
     /// Soft-deletes the Firestore profile (kept for admin as Deleted) and removes Auth so login/MFA cannot continue.
+    /// Schedules hard purge after 14 days via `scheduledHardDeleteAt` (same as user self-delete).
     /// Admin-only; cannot delete the signed-in admin or other configured admin accounts.
     func hardDeleteAdminUser(userId: String) async throws {
         try requireAdmin()
@@ -2772,6 +2777,14 @@ class FirebaseAuthService: ObservableObject {
         _ = try await Functions.functions(region: "us-central1")
             .httpsCallable("adminHardDeleteUser")
             .call(["userId": trimmed])
+
+        // Record actor even if the callable omits it (needed for admin Deleted profiles UI).
+        try? await db.collection("users").document(trimmed).setData([
+            "deletedBy": "admin",
+            "lastDeletedBy": "admin",
+            "deletedByAdmin": true,
+            "lastDeletedByAdmin": true
+        ], merge: true)
     }
 
     /// Restores a soft-deleted account (clears delete flags, recreates Auth if needed).
@@ -2791,18 +2804,38 @@ class FirebaseAuthService: ObservableObject {
             .call(["userId": trimmed])
     }
 
-    /// Active deleted accounts for the Restrict → Deleted profiles screen.
+    /// Soft-deleted + fully purged tombstones for Restrict → Deleted profiles.
     func fetchDeletedProfilesForAdmin() async throws -> [DeletedProfile] {
         try requireAdmin()
 
-        let snapshot = try await db.collection("users")
+        var profilesByUserId: [String: DeletedProfile] = [:]
+
+        let softDeleted = try await db.collection("users")
             .whereField("isDeleted", isEqualTo: true)
             .getDocuments()
-
-        let profiles = snapshot.documents.compactMap { document -> DeletedProfile? in
-            Self.parseDeletedProfile(documentID: document.documentID, data: document.data())
+        for document in softDeleted.documents {
+            if let profile = Self.parseDeletedProfile(documentID: document.documentID, data: document.data()) {
+                profilesByUserId[profile.userId] = profile
+            }
         }
-        return profiles.sorted {
+
+        do {
+            let records = try await db.collection("deletedAccountRecords").getDocuments()
+            for document in records.documents {
+                guard let profile = Self.parseFullyDeletedAccountRecord(
+                    documentID: document.documentID,
+                    data: document.data()
+                ) else { continue }
+                // Soft-deleted live users take precedence over an older tombstone.
+                if profilesByUserId[profile.userId] == nil {
+                    profilesByUserId[profile.userId] = profile
+                }
+            }
+        } catch {
+            print("⚠️ Unable to load deletedAccountRecords: \(error.localizedDescription)")
+        }
+
+        return profilesByUserId.values.sorted {
             ($0.deletedAt ?? .distantPast) > ($1.deletedAt ?? .distantPast)
         }
     }
@@ -2834,19 +2867,64 @@ class FirebaseAuthService: ObservableObject {
         }
     }
 
+    private static func parseDeletedByActor(from data: [String: Any], preferLast: Bool = false) -> DeletedByActor {
+        // Explicit string fields (newer admin/client writes).
+        let primaryKeys = preferLast
+            ? ["lastDeletedBy", "deletedBy", "deleted_by"]
+            : ["deletedBy", "deleted_by", "lastDeletedBy"]
+        for key in primaryKeys {
+            if let raw = data[key] as? String {
+                let parsed = DeletedByActor.parse(from: raw)
+                if parsed != .unknown { return parsed }
+            }
+        }
+
+        // Existing Cloud Function / registry flags.
+        let adminFlags = preferLast
+            ? ["lastDeletedByAdmin", "deletedByAdmin"]
+            : ["deletedByAdmin", "lastDeletedByAdmin"]
+        for key in adminFlags {
+            if data[key] as? Bool == true {
+                return .admin
+            }
+        }
+
+        if data["pendingAccountDeleted"] is [String: Any] {
+            return .admin
+        }
+
+        // Self-delete and admin delete both schedule hard purge via this field.
+        // Prefer deletedByAdmin / pendingAccountDeleted above when present.
+        if data["scheduledHardDeleteAt"] != nil {
+            return .user
+        }
+
+        // Active soft-delete without admin markers is a user self-delete.
+        if !preferLast, data["isDeleted"] as? Bool == true {
+            return .user
+        }
+
+        return .unknown
+    }
+
+    private static func parseEpochDate(from value: Any?) -> Date? {
+        if let timestamp = value as? Timestamp {
+            return timestamp.dateValue()
+        }
+        if let interval = value as? TimeInterval {
+            return Date(timeIntervalSince1970: interval)
+        }
+        if let number = value as? NSNumber {
+            return Date(timeIntervalSince1970: number.doubleValue)
+        }
+        return nil
+    }
+
     private static func parseDeletedProfile(documentID: String, data: [String: Any]) -> DeletedProfile? {
         guard data["isDeleted"] as? Bool == true else { return nil }
         let snapshot = freezeUserSnapshot(from: data)
-        let deletedAt: Date?
-        if let timestamp = data["deletedAt"] as? Timestamp {
-            deletedAt = timestamp.dateValue()
-        } else if let interval = data["deletedAt"] as? TimeInterval {
-            deletedAt = Date(timeIntervalSince1970: interval)
-        } else if let number = data["deletedAt"] as? NSNumber {
-            deletedAt = Date(timeIntervalSince1970: number.doubleValue)
-        } else {
-            deletedAt = nil
-        }
+        let deletedAt = parseEpochDate(from: data["deletedAt"])
+        let fullyDeletedAt = parseEpochDate(from: data["scheduledHardDeleteAt"])
 
         return DeletedProfile(
             id: documentID,
@@ -2856,32 +2934,39 @@ class FirebaseAuthService: ObservableObject {
             email: snapshot.email,
             photoURL: snapshot.photoURL,
             status: .active,
+            deletedBy: parseDeletedByActor(from: data),
             deletedAt: deletedAt,
+            fullyDeletedAt: fullyDeletedAt,
+            restoredAt: nil
+        )
+    }
+
+    private static func parseFullyDeletedAccountRecord(documentID: String, data: [String: Any]) -> DeletedProfile? {
+        guard data["isFullyDeleted"] as? Bool == true else { return nil }
+        let snapshot = freezeUserSnapshot(from: data)
+        let userId = (data["userId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedUserId = (userId?.isEmpty == false) ? userId! : documentID
+
+        return DeletedProfile(
+            id: "fully-\(resolvedUserId)",
+            userId: resolvedUserId,
+            name: snapshot.name,
+            age: snapshot.age,
+            email: snapshot.email,
+            photoURL: snapshot.photoURL,
+            status: .fullyDeleted,
+            deletedBy: parseDeletedByActor(from: data),
+            deletedAt: parseEpochDate(from: data["deletedAt"]),
+            fullyDeletedAt: parseEpochDate(from: data["fullyDeletedAt"]),
             restoredAt: nil
         )
     }
 
     private static func parseRestoredDeleteFromUser(documentID: String, data: [String: Any]) -> DeletedProfile? {
-        let restoredAt: Date?
-        if let timestamp = data["lastAccountRestoredAt"] as? Timestamp {
-            restoredAt = timestamp.dateValue()
-        } else if let interval = data["lastAccountRestoredAt"] as? TimeInterval {
-            restoredAt = Date(timeIntervalSince1970: interval)
-        } else {
-            return nil
-        }
+        let restoredAt = parseEpochDate(from: data["lastAccountRestoredAt"])
+        guard restoredAt != nil else { return nil }
 
-        let deletedAt: Date?
-        if let timestamp = data["lastDeletedAt"] as? Timestamp {
-            deletedAt = timestamp.dateValue()
-        } else if let interval = data["lastDeletedAt"] as? TimeInterval {
-            deletedAt = Date(timeIntervalSince1970: interval)
-        } else if let number = data["lastDeletedAt"] as? NSNumber {
-            deletedAt = Date(timeIntervalSince1970: number.doubleValue)
-        } else {
-            deletedAt = nil
-        }
-
+        let deletedAt = parseEpochDate(from: data["lastDeletedAt"])
         let snapshot = freezeUserSnapshot(from: data)
         return DeletedProfile(
             id: "restored-\(documentID)",
@@ -2891,7 +2976,9 @@ class FirebaseAuthService: ObservableObject {
             email: snapshot.email,
             photoURL: snapshot.photoURL,
             status: .restored,
+            deletedBy: parseDeletedByActor(from: data, preferLast: true),
             deletedAt: deletedAt,
+            fullyDeletedAt: nil,
             restoredAt: restoredAt
         )
     }

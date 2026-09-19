@@ -168,6 +168,7 @@ struct AdminDeletedProfilesView: View {
 
     @MainActor
     private func undelete(_ profile: DeletedProfile) async {
+        guard profile.canUndelete else { return }
         guard !isPerformingAction else { return }
         isPerformingAction = true
         defer { isPerformingAction = false }
@@ -262,20 +263,17 @@ private enum DeletedActionConfirmation: Identifiable {
 private struct AdminDeletedProfileRow: View {
     let profile: DeletedProfile
 
-    private var statusColor: Color {
-        profile.isCurrentlyDeleted ? .purple : .green
-    }
-
     var body: some View {
         HStack(spacing: 12) {
             profilePhoto
             VStack(alignment: .leading, spacing: 4) {
-                Text(titleText)
+                Text(profile.name)
                     .font(.headline)
                     .foregroundColor(SpectRoomTheme.text)
-                Text(profile.status.localizationKey.localized)
+                Text(profile.displayEmail)
                     .font(.caption.weight(.semibold))
-                    .foregroundColor(statusColor)
+                    .foregroundColor(SpectRoomTheme.secondaryText)
+                    .lineLimit(1)
                 if let deletedAt = profile.deletedAt {
                     Text(String(
                         format: "admin.deleted.since".localized,
@@ -303,13 +301,6 @@ private struct AdminDeletedProfileRow: View {
         .background(SpectRoomTheme.card)
         .cornerRadius(12)
         .contentShape(Rectangle())
-    }
-
-    private var titleText: String {
-        if let age = profile.age {
-            return "\(profile.name), \(age)"
-        }
-        return profile.name
     }
 
     private var profilePhoto: some View {
@@ -363,18 +354,21 @@ private struct AdminDeletedProfileDetailOverlay: View {
                 VStack(alignment: .leading, spacing: 16) {
                     HStack(alignment: .top, spacing: 12) {
                         profilePhoto
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(headlineText)
-                                .font(.system(size: 20, weight: .bold))
-                                .foregroundColor(primaryText)
-                            if let email = profile.email, !email.isEmpty {
-                                Text(email)
-                                    .font(.subheadline)
-                                    .foregroundColor(secondaryText)
-                            }
-                        }
+                        Text(profile.name)
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundColor(primaryText)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
 
+                    detailRow(
+                        title: "admin.deleted.detail.email".localized,
+                        value: profile.displayEmail
+                    )
+                    detailRow(
+                        title: "admin.deleted.detail.deleted.by".localized,
+                        value: profile.deletedBy.localizationKey.localized
+                    )
                     detailRow(
                         title: "admin.deleted.detail.status".localized,
                         value: profile.status.localizationKey.localized
@@ -385,6 +379,10 @@ private struct AdminDeletedProfileDetailOverlay: View {
                             value: ModerationNotice.formattedUnlockDate(deletedAt)
                         )
                     }
+                    detailRow(
+                        title: "admin.deleted.detail.fully.deleted.at".localized,
+                        value: profile.displayFullyDeletedAt
+                    )
                     if let restoredAt = profile.restoredAt, profile.isHistoryItem {
                         detailRow(
                             title: "admin.deleted.detail.restored.at".localized,
@@ -396,32 +394,7 @@ private struct AdminDeletedProfileDetailOverlay: View {
                         ProgressView()
                             .frame(maxWidth: .infinity)
                             .padding(.top, 4)
-                    } else if profile.isCurrentlyDeleted {
-                        HStack(spacing: 12) {
-                            Button(action: onDismiss) {
-                                Text("common.cancel".localized)
-                                    .font(.body.weight(.semibold))
-                                    .foregroundColor(primaryText)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 14)
-                                    .background(Color(.systemGray5))
-                                    .clipShape(Capsule())
-                            }
-                            .buttonStyle(.plain)
-
-                            Button(action: onUndelete) {
-                                Text("admin.deleted.action.undelete".localized)
-                                    .font(.body.weight(.semibold))
-                                    .foregroundColor(.white)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 14)
-                                    .background(Color.green)
-                                    .clipShape(Capsule())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.top, 4)
-                    } else {
+                    } else if profile.isHistoryItem {
                         HStack(spacing: 12) {
                             Button(action: onDismiss) {
                                 Text("common.cancel".localized)
@@ -446,6 +419,32 @@ private struct AdminDeletedProfileDetailOverlay: View {
                             .buttonStyle(.plain)
                         }
                         .padding(.top, 4)
+                    } else {
+                        HStack(spacing: 12) {
+                            Button(action: onDismiss) {
+                                Text("common.cancel".localized)
+                                    .font(.body.weight(.semibold))
+                                    .foregroundColor(primaryText)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 14)
+                                    .background(Color(.systemGray5))
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+
+                            Button(action: onUndelete) {
+                                Text("admin.deleted.action.undelete".localized)
+                                    .font(.body.weight(.semibold))
+                                    .foregroundColor(profile.canUndelete ? .white : secondaryText)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 14)
+                                    .background(profile.canUndelete ? Color.green : Color(.systemGray5))
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!profile.canUndelete)
+                        }
+                        .padding(.top, 4)
                     }
                 }
                 .padding(20)
@@ -456,13 +455,6 @@ private struct AdminDeletedProfileDetailOverlay: View {
                 .padding(.vertical, 40)
             }
         }
-    }
-
-    private var headlineText: String {
-        if let age = profile.age {
-            return "\(profile.name), \(age)"
-        }
-        return profile.name
     }
 
     private var profilePhoto: some View {

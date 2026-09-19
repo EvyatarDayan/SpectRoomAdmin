@@ -326,6 +326,7 @@
 "admin.support.action.resolve" = "Markera som hanterad";
 "admin.support.action.reopen" = "Öppna ärendet igen";
 "admin.reports.title" = "Adminrapporter";
+"admin.reports.new" = "Ny";
 "admin.reports.empty" = "Inga rapporter";
 "admin.reports.empty.description" = "Det finns inga rapporter i det här filtret.";
 "admin.reports.filter.pending" = "Väntande";
@@ -412,9 +413,17 @@
 "admin.deleted.since" = "Raderad %@";
 "admin.deleted.restored" = "Återställd %@";
 "admin.deleted.status.active" = "Raderad";
+"admin.deleted.status.fully.deleted" = "Fullständigt raderad";
 "admin.deleted.status.restored" = "Återställd av admin";
 "admin.deleted.detail.status" = "Status";
+"admin.deleted.detail.email" = "E-post";
+"admin.deleted.detail.deleted.by" = "Raderad av";
+"admin.deleted.by.user" = "Användare";
+"admin.deleted.by.admin" = "Admin";
+"admin.deleted.by.unknown" = "Okänd";
 "admin.deleted.detail.deleted.at" = "Raderad den";
+"admin.deleted.detail.fully.deleted.at" = "Fullständigt raderad den";
+"admin.deleted.detail.fully.deleted.not.scheduled" = "Inte schemalagd";
 "admin.deleted.detail.restored.at" = "Återställd den";
 "admin.deleted.action.undelete" = "Återställ";
 "admin.deleted.action.delete.again" = "Radera igen";

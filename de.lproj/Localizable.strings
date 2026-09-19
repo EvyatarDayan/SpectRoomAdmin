@@ -326,6 +326,7 @@
 "admin.support.action.resolve" = "Als erledigt markieren";
 "admin.support.action.reopen" = "Ticket erneut öffnen";
 "admin.reports.title" = "Admin-Meldungen";
+"admin.reports.new" = "Neu";
 "admin.reports.empty" = "Keine Meldungen";
 "admin.reports.empty.description" = "In diesem Filter gibt es keine Meldungen.";
 "admin.reports.filter.pending" = "Offen";
@@ -412,9 +413,17 @@
 "admin.deleted.since" = "Gelöscht %@";
 "admin.deleted.restored" = "Wiederhergestellt %@";
 "admin.deleted.status.active" = "Gelöscht";
+"admin.deleted.status.fully.deleted" = "Endgültig gelöscht";
 "admin.deleted.status.restored" = "Vom Admin wiederhergestellt";
 "admin.deleted.detail.status" = "Status";
+"admin.deleted.detail.email" = "E-Mail";
+"admin.deleted.detail.deleted.by" = "Gelöscht von";
+"admin.deleted.by.user" = "Benutzer";
+"admin.deleted.by.admin" = "Admin";
+"admin.deleted.by.unknown" = "Unbekannt";
 "admin.deleted.detail.deleted.at" = "Gelöscht am";
+"admin.deleted.detail.fully.deleted.at" = "Endgültig gelöscht am";
+"admin.deleted.detail.fully.deleted.not.scheduled" = "Nicht geplant";
 "admin.deleted.detail.restored.at" = "Wiederhergestellt am";
 "admin.deleted.action.undelete" = "Wiederherstellen";
 "admin.deleted.action.delete.again" = "Erneut löschen";

@@ -326,6 +326,7 @@
 "admin.support.action.resolve" = "Marcar como resuelto";
 "admin.support.action.reopen" = "Reabrir ticket";
 "admin.reports.title" = "Reportes de admin";
+"admin.reports.new" = "Nuevo";
 "admin.reports.empty" = "Sin reportes";
 "admin.reports.empty.description" = "No hay reportes en este filtro.";
 "admin.reports.filter.pending" = "Pendientes";
@@ -412,9 +413,17 @@
 "admin.deleted.since" = "Eliminado %@";
 "admin.deleted.restored" = "Restaurado %@";
 "admin.deleted.status.active" = "Eliminado";
+"admin.deleted.status.fully.deleted" = "Eliminado permanentemente";
 "admin.deleted.status.restored" = "Restaurado por admin";
 "admin.deleted.detail.status" = "Estado";
+"admin.deleted.detail.email" = "Correo";
+"admin.deleted.detail.deleted.by" = "Eliminado por";
+"admin.deleted.by.user" = "Usuario";
+"admin.deleted.by.admin" = "Admin";
+"admin.deleted.by.unknown" = "Desconocido";
 "admin.deleted.detail.deleted.at" = "Eliminado el";
+"admin.deleted.detail.fully.deleted.at" = "Eliminación completa el";
+"admin.deleted.detail.fully.deleted.not.scheduled" = "No programado";
 "admin.deleted.detail.restored.at" = "Restaurado el";
 "admin.deleted.action.undelete" = "Restaurar";
 "admin.deleted.action.delete.again" = "Eliminar de nuevo";

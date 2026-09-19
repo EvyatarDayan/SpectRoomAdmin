@@ -53,6 +53,7 @@ class AppStateManager: ObservableObject {
     @Published var pendingProfilesSearchQuery: String?
     /// Pending reports the admin has not opened yet (Restrict / reports badge).
     @Published var unseenAdminReportCount: Int = 0
+    @Published private(set) var unseenAdminReportIds: Set<String> = []
     private var pendingAdminReportIds: Set<String> = []
     private var seenAdminReportIds: Set<String> = []
     private let seenAdminReportsStorageKeyPrefix = "admin.seenReportIds."
@@ -161,6 +162,7 @@ class AppStateManager: ObservableObject {
                     self?.firebaseAuth.stopListeningForPendingAdminReports()
                     self?.pendingAdminReportIds = []
                     self?.seenAdminReportIds = []
+                    self?.unseenAdminReportIds = []
                     self?.unseenAdminReportCount = 0
                     // Keep login-blocked freeze notice so the user can still dismiss it after sign-out.
                     if case .loginBlocked = self?.pendingModerationNotice?.kind {
@@ -207,6 +209,7 @@ class AppStateManager: ObservableObject {
                     self?.firebaseAuth.stopListeningForPendingAdminReports()
                     self?.pendingAdminReportIds = []
                     self?.seenAdminReportIds = []
+                    self?.unseenAdminReportIds = []
                     self?.unseenAdminReportCount = 0
                 }
             }
@@ -1035,6 +1038,7 @@ class AppStateManager: ObservableObject {
         guard isAuthenticated, isAdminUser else {
             firebaseAuth.stopListeningForPendingAdminReports()
             pendingAdminReportIds = []
+            unseenAdminReportIds = []
             unseenAdminReportCount = 0
             return
         }
@@ -1057,8 +1061,13 @@ class AppStateManager: ObservableObject {
         refreshUnseenAdminReportCount()
     }
 
+    func isAdminReportUnseen(_ reportId: String) -> Bool {
+        unseenAdminReportIds.contains(reportId)
+    }
+
     private func refreshUnseenAdminReportCount() {
-        unseenAdminReportCount = pendingAdminReportIds.subtracting(seenAdminReportIds).count
+        unseenAdminReportIds = pendingAdminReportIds.subtracting(seenAdminReportIds)
+        unseenAdminReportCount = unseenAdminReportIds.count
     }
 
     private func seenAdminReportsStorageKey() -> String? {

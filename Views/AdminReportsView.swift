@@ -48,7 +48,10 @@ struct AdminReportsView: View {
                                 selectedReport = report
                                 appState.markAdminReportAsSeen(report.id)
                             } label: {
-                                AdminReportRow(report: report)
+                                AdminReportRow(
+                                    report: report,
+                                    isNew: appState.isAdminReportUnseen(report.id)
+                                )
                             }
                             .buttonStyle(.plain)
                             .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
@@ -271,8 +274,7 @@ private enum AdminReportFilter: String, CaseIterable, Identifiable {
 
 private struct AdminReportRow: View {
     let report: UserReport
-
-    private var isPending: Bool { report.status.lowercased() == "pending" }
+    let isNew: Bool
 
     private var statusColor: Color {
         switch report.status.lowercased() {
@@ -287,10 +289,33 @@ private struct AdminReportRow: View {
     var body: some View {
         HStack(spacing: 12) {
             profilePhoto
+                .overlay(alignment: .topTrailing) {
+                    if isNew {
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 10, height: 10)
+                            .overlay(
+                                Circle()
+                                    .stroke(SpectRoomTheme.card, lineWidth: 2)
+                            )
+                            .offset(x: 2, y: -2)
+                    }
+                }
             VStack(alignment: .leading, spacing: 4) {
-                Text(report.reportedName)
-                    .font(.headline)
-                    .foregroundColor(SpectRoomTheme.text)
+                HStack(spacing: 8) {
+                    Text(report.reportedName)
+                        .font(.headline)
+                        .foregroundColor(SpectRoomTheme.text)
+                    if isNew {
+                        Text("admin.reports.new".localized)
+                            .font(.caption2.weight(.bold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.red)
+                            .clipShape(Capsule())
+                    }
+                }
                 Text(report.category)
                     .font(.caption)
                     .foregroundColor(SpectRoomTheme.secondaryText)
