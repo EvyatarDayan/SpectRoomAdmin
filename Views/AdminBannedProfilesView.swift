@@ -2,6 +2,7 @@ import SwiftUI
 
 struct AdminBannedProfilesView: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var appState: AppStateManager
     @State private var filter: AdminBannedFilter = .banned
     @State private var bannedProfiles: [BannedProfile] = []
     @State private var historyProfiles: [BannedProfile] = []
@@ -10,11 +11,28 @@ struct AdminBannedProfilesView: View {
     @State private var pendingConfirmation: BannedActionConfirmation?
     @State private var actionError: String?
     @State private var isPerformingAction = false
+    @State private var searchText = ""
+
+    private var trimmedSearch: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isSearchActive: Bool {
+        !trimmedSearch.isEmpty
+    }
 
     private var displayedProfiles: [BannedProfile] {
+        let base: [BannedProfile]
         switch filter {
-        case .banned: return bannedProfiles
-        case .history: return historyProfiles
+        case .banned: base = bannedProfiles
+        case .history: base = historyProfiles
+        }
+        guard isSearchActive else { return base }
+        let query = trimmedSearch.lowercased()
+        return base.filter { profile in
+            profile.name.lowercased().contains(query)
+                || (profile.email?.lowercased().contains(query) ?? false)
+                || profile.userId.lowercased().contains(query)
         }
     }
 
@@ -28,7 +46,12 @@ struct AdminBannedProfilesView: View {
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 10)
+
+                searchBar
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
 
                 Group {
                     if isLoading {
@@ -58,6 +81,14 @@ struct AdminBannedProfilesView: View {
             .navigationTitle("admin.banned.title".localized)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        Task { await loadProfiles(forceRefresh: true) }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .disabled(isLoading)
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("common.done".localized) { dismiss() }
                 }
@@ -111,13 +142,13 @@ struct AdminBannedProfilesView: View {
 
     private var emptyState: some View {
         VStack(spacing: 12) {
-            Image(systemName: filter == .banned ? "person.crop.circle.badge.xmark" : "clock.arrow.circlepath")
+            Image(systemName: isSearchActive ? "magnifyingglass" : (filter == .banned ? "person.crop.circle.badge.xmark" : "clock.arrow.circlepath"))
                 .font(.system(size: 44))
                 .foregroundColor(.red)
-            Text(filter.emptyTitle)
+            Text(isSearchActive ? "admin.restrict.search.empty".localized : filter.emptyTitle)
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundColor(SpectRoomTheme.text)
-            Text(filter.emptyDescription)
+            Text(isSearchActive ? "admin.restrict.search.empty.description".localized : filter.emptyDescription)
                 .font(.subheadline)
                 .multilineTextAlignment(.center)
                 .foregroundColor(SpectRoomTheme.secondaryText)
@@ -126,8 +157,40 @@ struct AdminBannedProfilesView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private var searchBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .foregroundColor(SpectRoomTheme.secondaryText)
+            TextField("admin.restrict.search.placeholder".localized, text: $searchText)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                .keyboardType(.asciiCapable)
+                .textContentType(.none)
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(SpectRoomTheme.secondaryText)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(SpectRoomTheme.card)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
     @MainActor
-    private func loadProfiles() async {
+    private func loadProfiles(forceRefresh: Bool = false) async {
+        if !forceRefresh, let cache = appState.adminBannedProfilesCache {
+            bannedProfiles = cache.banned
+            historyProfiles = cache.history
+            isLoading = false
+            return
+        }
+
         isLoading = true
         defer { isLoading = false }
 
@@ -148,6 +211,10 @@ struct AdminBannedProfilesView: View {
             if filter == .history {
                 errors.append(error.localizedDescription)
             }
+        }
+
+        if errors.isEmpty {
+            appState.updateAdminBannedProfilesCache(banned: bannedProfiles, history: historyProfiles)
         }
 
         if let firstError = errors.first {
@@ -172,7 +239,7 @@ struct AdminBannedProfilesView: View {
         do {
             try await FirebaseAuthService.shared.removeAccountBan(userId: profile.userId)
             selectedProfile = nil
-            await loadProfiles()
+            await loadProfiles(forceRefresh: true)
         } catch {
             actionError = error.localizedDescription
         }
@@ -190,7 +257,7 @@ struct AdminBannedProfilesView: View {
             )
             selectedProfile = nil
             filter = .banned
-            await loadProfiles()
+            await loadProfiles(forceRefresh: true)
         } catch {
             actionError = error.localizedDescription
         }

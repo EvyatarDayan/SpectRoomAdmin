@@ -5,6 +5,8 @@ struct AdminDashboardStats: Equatable {
     var activeUsers: Int = 0
     var onlineUsers: Int = 0
     var pendingReports: Int = 0
+    var pendingSupportTickets: Int = 0
+    var resolvedSupportTickets: Int = 0
     var newRegistrationsToday: Int = 0
     var activeBans: Int = 0
     var activeFreezes: Int = 0

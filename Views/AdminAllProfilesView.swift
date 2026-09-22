@@ -78,7 +78,11 @@ struct AdminAllProfilesView: View {
                             options: Array(AdminProfileStatusFilter.allCases),
                             selection: $selectedStatusFilter,
                             clearTitle: "admin.all.profiles.filter.all".localized,
-                            clearSystemImage: "person.3",
+                            clearSystemImage: "arrow.clockwise",
+                            clearUsesFixedSystemImage: true,
+                            onClear: {
+                                Task { await loadInitial(forceRefresh: true) }
+                            },
                             title: { $0.title },
                             systemImage: { $0.systemImage }
                         )
@@ -129,16 +133,28 @@ struct AdminAllProfilesView: View {
             }
             .onChange(of: selectedStatusFilter) { oldValue, newValue in
                 Task {
-                    if newValue == .incomplete || oldValue == .incomplete {
+                    // All (nil) is handled by onClear → force refresh.
+                    guard let newValue else { return }
+
+                    if newValue == .incomplete {
                         if !isSearchActive {
-                            await loadInitial()
+                            await loadInitial(forceRefresh: true)
                         } else {
                             await refreshTotalCount()
                         }
-                    } else {
+                        return
+                    }
+
+                    if oldValue == .incomplete {
+                        // Leave incomplete query; restore cached All list then client-filter.
+                        await loadInitial(forceRefresh: false)
                         await ensureFilteredResults()
                         await refreshTotalCount()
+                        return
                     }
+
+                    await ensureFilteredResults()
+                    await refreshTotalCount()
                 }
             }
         }
@@ -151,19 +167,20 @@ struct AdminAllProfilesView: View {
 
     private var profilesContent: some View {
         VStack(spacing: 0) {
-            searchBar
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                .padding(.bottom, 8)
-
             if let totalCount {
                 Text(profilesCountText(for: totalCount))
-                    .font(.subheadline.weight(.medium))
+                    .font(.subheadline)
                     .foregroundColor(SpectRoomTheme.secondaryText)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
+                    .padding(.top, 12)
+                    .padding(.bottom, 8)
             }
+
+            searchBar
+                .padding(.horizontal, 16)
+                .padding(.top, totalCount == nil ? 12 : 0)
+                .padding(.bottom, 8)
 
             Group {
                 if isLoading {
@@ -366,6 +383,7 @@ struct AdminAllProfilesView: View {
         if selectedProfile?.id == updated.id {
             selectedProfile = updated
         }
+        syncAdminProfilesCacheFromCurrentState()
     }
 
     @MainActor
@@ -376,6 +394,7 @@ struct AdminAllProfilesView: View {
         switch selectedStatusFilter {
         case .incomplete, .frozen, .banned:
             profiles.removeAll { $0.id == updated.id }
+            syncAdminProfilesCacheFromCurrentState()
         default:
             break
         }
@@ -428,9 +447,51 @@ struct AdminAllProfilesView: View {
     }
 
     @MainActor
-    private func loadInitial() async {
+    private func restoreProfilesFromCacheIfAvailable() -> Bool {
+        guard selectedStatusFilter != .incomplete,
+              !isSearchActive,
+              let cache = appState.adminAllProfilesCache,
+              !cache.profiles.isEmpty else {
+            return false
+        }
+        profiles = cache.profiles
+        lastDocumentId = cache.lastDocumentId
+        hasMore = cache.hasMore
+        totalCount = cache.totalCount
+        loadError = nil
+        return true
+    }
+
+    @MainActor
+    private func syncAdminProfilesCacheFromCurrentState() {
+        // Incomplete uses a separate query; don't overwrite the All-list cache with it.
+        guard selectedStatusFilter != .incomplete, !isSearchActive else { return }
+        guard !profiles.isEmpty else { return }
+        // While a status filter is active, UI totalCount is filtered — keep prior All count.
+        let allTotalCount = selectedStatusFilter == nil
+            ? totalCount
+            : appState.adminAllProfilesCache?.totalCount
+        appState.updateAdminAllProfilesCache(
+            profiles: profiles,
+            lastDocumentId: lastDocumentId,
+            hasMore: hasMore,
+            totalCount: allTotalCount
+        )
+    }
+
+    @MainActor
+    private func loadInitial(forceRefresh: Bool = false) async {
         if isSearchActive {
             await performSearch()
+            return
+        }
+
+        if !forceRefresh, restoreProfilesFromCacheIfAvailable() {
+            isLoading = false
+            if isStatusFilterActive {
+                await ensureFilteredResults()
+                await refreshTotalCount()
+            }
             return
         }
 
@@ -467,6 +528,7 @@ struct AdminAllProfilesView: View {
                 } catch {
                     print("⚠️ Failed fetching admin users total count: \(error.localizedDescription)")
                 }
+                syncAdminProfilesCacheFromCurrentState()
             }
         } catch {
             profiles = []
@@ -474,6 +536,9 @@ struct AdminAllProfilesView: View {
             hasMore = false
             totalCount = nil
             loadError = error.localizedDescription
+            if selectedStatusFilter != .incomplete {
+                appState.clearAdminAllProfilesCache()
+            }
         }
     }
 
@@ -492,6 +557,7 @@ struct AdminAllProfilesView: View {
             if let pageTotal = page.totalCount {
                 totalCount = pageTotal
             }
+            syncAdminProfilesCacheFromCurrentState()
         } catch {
             loadError = error.localizedDescription
         }
@@ -672,6 +738,7 @@ private struct AdminUserDetailOverlay: View {
     @State private var showingDeleteConfirm = false
     @State private var isDeletingAccount = false
     @State private var deleteAccountError: String?
+    @State private var photoViewerIndex: Int?
 
     init(
         profile: AdminUserProfile,
@@ -691,6 +758,21 @@ private struct AdminUserDetailOverlay: View {
     private var panelBackground: Color { isLight ? .white : .black }
     private var primaryText: Color { isLight ? .black : .white }
     private var secondaryText: Color { isLight ? Color.black.opacity(0.55) : Color.white.opacity(0.7) }
+
+    /// Profile photo first, then gallery photos (deduped).
+    private var profileGalleryPhotos: [String] {
+        var urls: [String] = []
+        if let photoURL = currentProfile.photoURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !photoURL.isEmpty {
+            urls.append(photoURL)
+        }
+        for photo in currentProfile.photos {
+            let trimmed = photo.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !urls.contains(trimmed) else { continue }
+            urls.append(trimmed)
+        }
+        return urls
+    }
 
     var body: some View {
         ZStack {
@@ -803,6 +885,18 @@ private struct AdminUserDetailOverlay: View {
                     }
                 )
                 .zIndex(3)
+            }
+
+            if let photoViewerIndex {
+                AdminProfilePhotoViewerOverlay(
+                    photos: profileGalleryPhotos,
+                    selectedIndex: Binding(
+                        get: { photoViewerIndex },
+                        set: { self.photoViewerIndex = $0 }
+                    ),
+                    onDismiss: { self.photoViewerIndex = nil }
+                )
+                .zIndex(4)
             }
         }
         .sheet(isPresented: $showingExportShareSheet, onDismiss: {
@@ -934,18 +1028,24 @@ private struct AdminUserDetailOverlay: View {
     private var profileTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                if !currentProfile.photos.isEmpty {
+                if !profileGalleryPhotos.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 10) {
-                            ForEach(currentProfile.photos, id: \.self) { photo in
+                            ForEach(Array(profileGalleryPhotos.enumerated()), id: \.offset) { index, photo in
                                 if let url = URL(string: photo) {
-                                    CachedAsyncImage(url: url) { image in
-                                        image.resizable().aspectRatio(contentMode: .fill)
-                                    } placeholder: {
-                                        Color.gray.opacity(0.2)
+                                    Button {
+                                        photoViewerIndex = index
+                                    } label: {
+                                        CachedAsyncImage(url: url) { image in
+                                            image.resizable().aspectRatio(contentMode: .fill)
+                                        } placeholder: {
+                                            Color.gray.opacity(0.2)
+                                        }
+                                        .frame(width: 96, height: 128)
+                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                                     }
-                                    .frame(width: 96, height: 128)
-                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                    .buttonStyle(.plain)
                                 }
                             }
                         }
@@ -1134,7 +1234,8 @@ private struct AdminUserDetailOverlay: View {
         case .freeze: return .blue
         case .freezeEnded: return .mint
         case .ban: return .red
-        case .banLifted: return .green
+        case .banLifted, .undeleted: return .green
+        case .softDeleted, .fullyDeleted: return .purple
         }
     }
 
@@ -1267,6 +1368,8 @@ private struct AdminUserDetailOverlay: View {
             restrictFollowUp = .freeze
         case .ban:
             restrictFollowUp = .ban
+        case .delete:
+            showingDeleteConfirm = true
         }
     }
 
@@ -1887,6 +1990,143 @@ private struct AdminConversationMediaGalleryOverlay: View {
     }
 }
 
+private struct AdminProfilePhotoViewerOverlay: View {
+    let photos: [String]
+    @Binding var selectedIndex: Int
+    let onDismiss: () -> Void
+
+    @State private var isSaving = false
+    @State private var showingSaveAlert = false
+    @State private var saveSuccess = false
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.92)
+                .ignoresSafeArea()
+                .onTapGesture(perform: onDismiss)
+
+            VStack(spacing: 0) {
+                HStack {
+                    Button(action: onDismiss) {
+                        Text("common.done".localized)
+                            .font(.headline)
+                            .foregroundColor(.white)
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer()
+
+                    Button("common.save".localized) {
+                        saveCurrentPhoto()
+                    }
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .buttonStyle(.plain)
+                    .disabled(isSaving || photos.isEmpty)
+                    .opacity(isSaving || photos.isEmpty ? 0.5 : 1)
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 16)
+                .padding(.bottom, 8)
+
+                if photos.isEmpty {
+                    Spacer()
+                    Image(systemName: "photo")
+                        .font(.system(size: 60))
+                        .foregroundColor(.white.opacity(0.8))
+                    Spacer()
+                } else {
+                    TabView(selection: $selectedIndex) {
+                        ForEach(Array(photos.enumerated()), id: \.offset) { index, photoURL in
+                            CachedAsyncImage(url: URL(string: photoURL)) { image in
+                                image
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fit)
+                                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            } placeholder: {
+                                ProgressView()
+                                    .tint(.white)
+                            }
+                            .padding(.horizontal, 24)
+                            .tag(index)
+                        }
+                    }
+                    .tabViewStyle(.page(indexDisplayMode: .automatic))
+                    .indexViewStyle(.page(backgroundDisplayMode: .always))
+
+                    Text("\(min(max(selectedIndex, 0), photos.count - 1) + 1)/\(photos.count)")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(.white.opacity(0.85))
+                        .padding(.top, 8)
+                        .padding(.bottom, 20)
+                }
+            }
+
+            if isSaving {
+                ProgressView()
+                    .tint(.white)
+                    .padding(16)
+                    .background(Circle().fill(Color.black.opacity(0.45)))
+            }
+        }
+        .alert("messages.image.saved".localized, isPresented: $showingSaveAlert) {
+            Button("common.ok".localized) { }
+        } message: {
+            Text(saveSuccess ? "messages.image.saved.success".localized : "messages.image.saved.failed".localized)
+        }
+    }
+
+    private func saveCurrentPhoto() {
+        guard !isSaving, !photos.isEmpty else { return }
+        let index = min(max(selectedIndex, 0), photos.count - 1)
+        let content = photos[index]
+        guard let url = URL(string: content) else {
+            saveSuccess = false
+            showingSaveAlert = true
+            return
+        }
+
+        isSaving = true
+        Task {
+            do {
+                var status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+                if status == .notDetermined {
+                    status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+                }
+                guard status == .authorized || status == .limited else {
+                    await MainActor.run {
+                        isSaving = false
+                        saveSuccess = false
+                        showingSaveAlert = true
+                    }
+                    return
+                }
+
+                let (data, _) = try await URLSession.shared.data(from: url)
+                guard let image = UIImage(data: data) else {
+                    throw NSError(domain: "AdminProfilePhotoSave", code: 1)
+                }
+
+                try await PHPhotoLibrary.shared().performChanges {
+                    PHAssetChangeRequest.creationRequestForAsset(from: image)
+                }
+
+                await MainActor.run {
+                    isSaving = false
+                    saveSuccess = true
+                    showingSaveAlert = true
+                }
+            } catch {
+                await MainActor.run {
+                    isSaving = false
+                    saveSuccess = false
+                    showingSaveAlert = true
+                }
+            }
+        }
+    }
+}
+
 private struct AdminConversationMediaViewerOverlay: View {
     let mediaItems: [AdminConversationMediaItem]
     @Binding var selectedIndex: Int
@@ -2454,6 +2694,7 @@ private enum AdminProfileRestrictAction: Equatable {
     case warn
     case freeze
     case ban
+    case delete
 }
 
 private enum AdminProfileRestrictFollowUp: Equatable {
@@ -2551,6 +2792,11 @@ private struct AdminProfileRestrictOverlay: View {
                     title: "admin.reports.action.ban".localized,
                     subtitle: "admin.all.profiles.restrict.ban.subtitle".localized,
                     action: .ban
+                )
+                optionRow(
+                    title: "admin.all.profiles.restrict.delete".localized,
+                    subtitle: "admin.all.profiles.restrict.delete.subtitle".localized,
+                    action: .delete
                 )
 
                 if isSubmitting {

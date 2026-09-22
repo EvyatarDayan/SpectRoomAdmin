@@ -40,18 +40,40 @@ struct AdminHubView: View {
             }
             .sheet(isPresented: $showingAdminFrozenProfiles) {
                 AdminFrozenProfilesView()
+                    .environmentObject(appState)
                     .interactiveDismissDisabled(true)
             }
             .sheet(isPresented: $showingAdminBannedProfiles) {
                 AdminBannedProfilesView()
+                    .environmentObject(appState)
                     .interactiveDismissDisabled(true)
             }
             .sheet(isPresented: $showingAdminDeletedProfiles) {
                 AdminDeletedProfilesView()
+                    .environmentObject(appState)
                     .interactiveDismissDisabled(true)
+            }
+            .onAppear { applyRequestedRestrictSheetIfNeeded() }
+            .onChange(of: appState.requestedAdminRestrictSheet) { _ in
+                applyRequestedRestrictSheetIfNeeded()
             }
         }
         .navigationViewStyle(.stack)
+    }
+
+    private func applyRequestedRestrictSheetIfNeeded() {
+        guard let sheet = appState.requestedAdminRestrictSheet else { return }
+        appState.requestedAdminRestrictSheet = nil
+        switch sheet {
+        case .reports:
+            showingAdminReports = true
+        case .frozen:
+            showingAdminFrozenProfiles = true
+        case .banned:
+            showingAdminBannedProfiles = true
+        case .deleted:
+            showingAdminDeletedProfiles = true
+        }
     }
 
     private var adminCards: some View {
@@ -60,7 +82,7 @@ struct AdminHubView: View {
                 title: "admin.reports.button.title".localized,
                 subtitle: "admin.reports.button.subtitle".localized,
                 systemImage: "shield.fill",
-                iconColor: .orange,
+                iconColor: .blue,
                 badgeCount: appState.unseenAdminReportCount
             ) {
                 showingAdminReports = true
@@ -79,7 +101,7 @@ struct AdminHubView: View {
                 title: "admin.banned.button.title".localized,
                 subtitle: "admin.banned.button.subtitle".localized,
                 systemImage: "person.crop.circle.badge.xmark",
-                iconColor: .red
+                iconColor: .blue
             ) {
                 showingAdminBannedProfiles = true
             }
@@ -88,7 +110,7 @@ struct AdminHubView: View {
                 title: "admin.deleted.button.title".localized,
                 subtitle: "admin.deleted.button.subtitle".localized,
                 systemImage: "trash.circle.fill",
-                iconColor: .purple
+                iconColor: .blue
             ) {
                 showingAdminDeletedProfiles = true
             }

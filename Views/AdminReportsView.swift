@@ -1,4 +1,4 @@
-import SwiftUI
+    import SwiftUI
 
 struct AdminReportsView: View {
     @Environment(\.dismiss) private var dismiss
@@ -11,16 +11,38 @@ struct AdminReportsView: View {
     @State private var actionError: String?
     @State private var isPerformingAction = false
     @State private var pendingModerationStep: AdminReportModerationStep?
+    @State private var searchText = ""
+
+    private var trimmedSearch: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isSearchActive: Bool {
+        !trimmedSearch.isEmpty
+    }
 
     private var filteredReports: [UserReport] {
+        let statusFiltered: [UserReport]
         switch filter {
         case .pending:
-            return reports.filter { $0.status.lowercased() == "pending" }
+            statusFiltered = reports.filter { $0.status.lowercased() == "pending" }
         case .actioned:
-            return reports.filter {
+            statusFiltered = reports.filter {
                 let status = $0.status.lowercased()
                 return status == "actioned" || status == "dismissed" || status == "reviewed"
             }
+        }
+        guard isSearchActive else { return statusFiltered }
+        let query = trimmedSearch.lowercased()
+        return statusFiltered.filter { report in
+            report.reportedName.lowercased().contains(query)
+                || report.displayReporterName.lowercased().contains(query)
+                || (report.reportedEmail?.lowercased().contains(query) ?? false)
+                || (report.reporterEmail?.lowercased().contains(query) ?? false)
+                || report.reportedUserId.lowercased().contains(query)
+                || report.reporterUserId.lowercased().contains(query)
+                || report.category.lowercased().contains(query)
+                || (report.details?.lowercased().contains(query) ?? false)
         }
     }
 
@@ -34,7 +56,12 @@ struct AdminReportsView: View {
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 10)
+
+                searchBar
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
 
                 Group {
                     if isLoading {
@@ -68,6 +95,14 @@ struct AdminReportsView: View {
             .navigationTitle("admin.reports.title".localized)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        Task { await loadReports(forceRefresh: true) }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .disabled(isLoading)
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("common.done".localized) {
                         handleDoneTapped()
@@ -146,19 +181,59 @@ struct AdminReportsView: View {
 
     private var emptyState: some View {
         VStack(spacing: 12) {
-            Text("🛡️")
-                .font(.system(size: 48))
-            Text("admin.reports.empty".localized)
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundColor(SpectRoomTheme.text)
-                .multilineTextAlignment(.center)
-            Text("admin.reports.empty.description".localized)
-                .font(.subheadline)
-                .foregroundColor(SpectRoomTheme.text)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
+            if isSearchActive {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 44))
+                    .foregroundColor(.orange)
+                Text("admin.reports.search.empty".localized)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(SpectRoomTheme.text)
+                    .multilineTextAlignment(.center)
+                Text("admin.reports.search.empty.description".localized)
+                    .font(.subheadline)
+                    .foregroundColor(SpectRoomTheme.text)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+            } else {
+                Text("🛡️")
+                    .font(.system(size: 48))
+                Text("admin.reports.empty".localized)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(SpectRoomTheme.text)
+                    .multilineTextAlignment(.center)
+                Text("admin.reports.empty.description".localized)
+                    .font(.subheadline)
+                    .foregroundColor(SpectRoomTheme.text)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .foregroundColor(SpectRoomTheme.secondaryText)
+            TextField("admin.reports.search.placeholder".localized, text: $searchText)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                .keyboardType(.asciiCapable)
+                .textContentType(.none)
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(SpectRoomTheme.secondaryText)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(SpectRoomTheme.card)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private func handleSelectedAction(_ action: AdminReportSelectedAction, for report: UserReport) {
@@ -174,10 +249,17 @@ struct AdminReportsView: View {
         }
     }
 
-    private func loadReports() async {
+    private func loadReports(forceRefresh: Bool = false) async {
+        if !forceRefresh, let cache = appState.adminReportsCache {
+            reports = cache.reports
+            isLoading = false
+            return
+        }
+
         isLoading = true
         do {
             reports = try await FirebaseAuthService.shared.fetchAllReportsForAdmin()
+            appState.updateAdminReportsCache(reports: reports)
         } catch {
             actionError = error.localizedDescription
             reports = []
@@ -238,6 +320,11 @@ struct AdminReportsView: View {
     private func refreshAfterAction() async {
         do {
             reports = try await FirebaseAuthService.shared.fetchAllReportsForAdmin()
+            appState.updateAdminReportsCache(reports: reports)
+            // Moderation actions can change Frozen / Banned lists and dashboard counts.
+            appState.clearAdminFrozenProfilesCache()
+            appState.clearAdminBannedProfilesCache()
+            appState.clearAdminDashboardStatsCache()
             selectedReport = nil
             pendingModerationStep = nil
         } catch {

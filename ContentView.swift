@@ -17,6 +17,14 @@ enum AdminTab: Int {
     case settings = 4
 }
 
+/// Restrict hub sheets opened from elsewhere (e.g. Dashboard metric tap).
+enum AdminRestrictSheet: Equatable {
+    case reports
+    case frozen
+    case banned
+    case deleted
+}
+
 struct ContentView: View {
     @State private var selectedTab = AdminTab.dashboard.rawValue
     @EnvironmentObject var appState: AppStateManager

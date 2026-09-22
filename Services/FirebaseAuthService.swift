@@ -292,6 +292,14 @@ class FirebaseAuthService: ObservableObject {
                 "scheduledHardDeleteAt": hardDeleteAt
             ])
         }
+
+        try? await logModerationDeletionEvent(
+            userId: user.uid,
+            type: .softDeleted,
+            deletedBy: .user,
+            scheduledHardDeleteAt: Date(timeIntervalSince1970: hardDeleteAt),
+            createdAt: Date(timeIntervalSince1970: now)
+        )
         
         print("🗑️ Account marked for deletion: \(user.uid), hard delete after \(hardDeleteAt)")
     }
@@ -1205,33 +1213,25 @@ class FirebaseAuthService: ObservableObject {
     }
 
     /// Help & Support tickets for the admin Support section, newest first.
-    func fetchSupportTicketsForAdmin() async throws -> [SupportTicket] {
+    func fetchSupportTicketsForAdmin(forceRefresh: Bool = false) async throws -> [SupportTicket] {
         try requireAdmin()
-
-        let snapshot = try await db.collection("supportMessages").getDocuments()
-        let tickets = snapshot.documents.compactMap { document -> SupportTicket? in
-            Self.parseSupportTicket(documentID: document.documentID, data: document.data())
-        }
-        return tickets.sorted {
-            ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast)
-        }
+        return try await loadAllEnrichedSupportTickets(forceRefresh: forceRefresh)
+            .sorted { $0.listSortDate > $1.listSortDate }
     }
 
     /// Paginated Support tickets for the given status / topic / search filters.
-    /// Scans `supportMessages`, filters, then returns one page plus the full matching total.
+    /// Uses the in-session enriched ticket cache unless `forceRefresh` is true.
     func fetchSupportTicketsPage(
         status: AdminSupportTicketsStatusFilter,
         topicAliases: Set<String>? = nil,
         searchQuery: String? = nil,
         limit: Int = 25,
-        startAfterDocumentId: String? = nil
+        startAfterDocumentId: String? = nil,
+        forceRefresh: Bool = false
     ) async throws -> SupportTicketsPage {
         try requireAdmin()
 
-        let snapshot = try await db.collection("supportMessages").getDocuments()
-        var tickets = snapshot.documents.compactMap { document -> SupportTicket? in
-            Self.parseSupportTicket(documentID: document.documentID, data: document.data())
-        }
+        var tickets = try await loadAllEnrichedSupportTickets(forceRefresh: forceRefresh)
 
         switch status {
         case .open:
@@ -1256,13 +1256,13 @@ class FirebaseAuthService: ObservableObject {
                         || ticket.userEmail.lowercased().contains(query)
                         || ticket.message.lowercased().contains(query)
                         || ticket.displayTicketNumber.lowercased().contains(query)
+                        || ticket.topic.lowercased().contains(query)
                 }
             }
         }
 
-        tickets.sort {
-            ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast)
-        }
+        // Newest first: pending by created date, resolved by resolve time.
+        tickets.sort { $0.listSortDate > $1.listSortDate }
 
         let startIndex: Int
         if let startAfterDocumentId,
@@ -1279,6 +1279,167 @@ class FirebaseAuthService: ObservableObject {
             hasMore: startIndex + page.count < tickets.count,
             totalCount: tickets.count
         )
+    }
+
+    private func loadAllEnrichedSupportTickets(forceRefresh: Bool) async throws -> [SupportTicket] {
+        if !forceRefresh,
+           let cached = await MainActor.run(body: { AppStateManager.shared.adminSupportTicketsCache?.tickets }) {
+            return cached
+        }
+
+        let snapshot = try await db.collection("supportMessages").getDocuments()
+        var tickets = snapshot.documents.compactMap { document -> SupportTicket? in
+            Self.parseSupportTicket(documentID: document.documentID, data: document.data())
+        }
+        tickets = await enrichSupportTickets(tickets)
+        await MainActor.run {
+            AppStateManager.shared.updateAdminSupportTicketsCache(tickets: tickets)
+        }
+        return tickets
+    }
+
+    /// Fill missing / placeholder names & emails from the live user profile (or tombstone).
+    private func enrichSupportTickets(_ tickets: [SupportTicket]) async -> [SupportTicket] {
+        let ticketsNeedingEnrichment = tickets.filter(\.needsProfileEnrichment)
+        guard !ticketsNeedingEnrichment.isEmpty else { return tickets }
+
+        var profilesByUserId: [String: (name: String?, email: String?)] = [:]
+        var profilesByEmail: [String: (name: String?, email: String?, userId: String)] = [:]
+
+        let userIds = Array(
+            Set(
+                ticketsNeedingEnrichment.compactMap { ticket -> String? in
+                    let id = ticket.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !id.isEmpty, id.lowercased() != "unknown" else { return nil }
+                    return id
+                }
+            )
+        )
+
+        await withTaskGroup(of: (String, String?, String?).self) { group in
+            for userId in userIds {
+                group.addTask {
+                    if let snap = try? await self.db.collection("users").document(userId).getDocument(),
+                       snap.exists,
+                       let data = snap.data() {
+                        let name = (data["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let email = (data["email"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        return (userId, name, email)
+                    }
+                    if let snap = try? await self.db.collection("deletedAccountRecords").document(userId).getDocument(),
+                       snap.exists,
+                       let data = snap.data() {
+                        let name = (data["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let email = (data["email"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        return (userId, name, email)
+                    }
+                    return (userId, nil, nil)
+                }
+            }
+            for await (userId, name, email) in group {
+                profilesByUserId[userId] = (name, email)
+            }
+        }
+
+        // Tickets often store a local UUID instead of the Firebase Auth UID — resolve by email.
+        let emailsNeedingLookup = ticketsNeedingEnrichment.compactMap { ticket -> String? in
+            let email = ticket.userEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard email.contains("@") else { return nil }
+            if let byId = profilesByUserId[ticket.userId],
+               let name = byId.name,
+               !SupportTicket.isPlaceholderName(name) {
+                return nil
+            }
+            return email
+        }
+        let uniqueEmails = Array(Set(emailsNeedingLookup.map { $0.lowercased() })).compactMap { lower in
+            emailsNeedingLookup.first { $0.lowercased() == lower }
+        }
+
+        for email in uniqueEmails {
+            if let snapshot = try? await db.collection("users")
+                .whereField("email", isEqualTo: email)
+                .limit(to: 1)
+                .getDocuments(),
+               let doc = snapshot.documents.first {
+                let data = doc.data()
+                let name = (data["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let resolvedEmail = (data["email"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let name, !SupportTicket.isPlaceholderName(name) {
+                    profilesByEmail[email.lowercased()] = (name, resolvedEmail, doc.documentID)
+                    continue
+                }
+            }
+            // Some accounts store email with different casing.
+            if email != email.lowercased(),
+               let snapshot = try? await db.collection("users")
+                .whereField("email", isEqualTo: email.lowercased())
+                .limit(to: 1)
+                .getDocuments(),
+               let doc = snapshot.documents.first {
+                let data = doc.data()
+                let name = (data["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let resolvedEmail = (data["email"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let name, !SupportTicket.isPlaceholderName(name) {
+                    profilesByEmail[email.lowercased()] = (name, resolvedEmail, doc.documentID)
+                }
+            }
+        }
+
+        return tickets.map { ticket in
+            guard ticket.needsProfileEnrichment else { return ticket }
+
+            var resolvedName = ticket.userName
+            var resolvedEmail = ticket.userEmail
+            var resolvedUserId = ticket.userId
+
+            if let byId = profilesByUserId[ticket.userId] {
+                if let name = byId.name, !SupportTicket.isPlaceholderName(name) {
+                    resolvedName = name
+                }
+                if let email = byId.email, email.contains("@") {
+                    resolvedEmail = email
+                }
+            }
+
+            if SupportTicket.isPlaceholderName(resolvedName) {
+                let emailKey = ticket.userEmail.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                if let byEmail = profilesByEmail[emailKey] {
+                    if let name = byEmail.name, !SupportTicket.isPlaceholderName(name) {
+                        resolvedName = name
+                    }
+                    if let email = byEmail.email, email.contains("@") {
+                        resolvedEmail = email
+                    }
+                    if !byEmail.userId.isEmpty {
+                        resolvedUserId = byEmail.userId
+                    }
+                }
+            }
+
+            guard resolvedName != ticket.userName
+                || resolvedEmail != ticket.userEmail
+                || resolvedUserId != ticket.userId
+            else {
+                return ticket
+            }
+
+            return SupportTicket(
+                id: ticket.id,
+                ticketNumber: ticket.ticketNumber,
+                userId: resolvedUserId,
+                userName: resolvedName,
+                userEmail: resolvedEmail,
+                topic: ticket.topic,
+                message: ticket.message,
+                imageURL: ticket.imageURL,
+                status: ticket.status,
+                createdAt: ticket.createdAt,
+                resolvedAt: ticket.resolvedAt,
+                updatedAt: ticket.updatedAt,
+                adminReply: ticket.adminReply
+            )
+        }
     }
 
     func updateSupportTicketStatus(ticketId: String, status: String) async throws {
@@ -1299,15 +1460,120 @@ class FirebaseAuthService: ObservableObject {
         } else {
             payload["resolvedAt"] = FieldValue.delete()
             payload["resolvedBy"] = FieldValue.delete()
+            payload["resolutionEmailBody"] = FieldValue.delete()
+            payload["adminReply"] = FieldValue.delete()
+            payload["resolutionEmailSentAt"] = FieldValue.delete()
         }
 
         try await db.collection("supportMessages").document(ticketId).setData(payload, merge: true)
     }
 
+    /// Marks a support ticket resolved (or keeps it pending) and emails the admin-edited message body.
+    func resolveSupportTicket(
+        ticketId documentId: String,
+        emailBody: String,
+        humanTicketNumber: String? = nil,
+        keepPending: Bool = false
+    ) async throws {
+        try requireAdmin()
+        guard let adminId = auth.currentUser?.uid else {
+            throw SpectRoomAuthError.notAuthenticated
+        }
+        let trimmedDocId = documentId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedBody = emailBody.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedDocId.isEmpty else {
+            throw NSError(
+                domain: "FirebaseAuthService",
+                code: 400,
+                userInfo: [NSLocalizedDescriptionKey: "Ticket id required"]
+            )
+        }
+        guard !trimmedBody.isEmpty else {
+            throw NSError(
+                domain: "FirebaseAuthService",
+                code: 400,
+                userInfo: [NSLocalizedDescriptionKey: "Message required"]
+            )
+        }
+
+        // Keep the original human-readable ticket number — never replace it with the document id.
+        var preservedNumber: String?
+        if let candidate = humanTicketNumber?.trimmingCharacters(in: .whitespacesAndNewlines),
+           SupportTicket.isHumanTicketNumber(candidate) {
+            preservedNumber = candidate
+        } else if let snap = try? await db.collection("supportMessages").document(trimmedDocId).getDocument(),
+                  let data = snap.data() {
+            for key in ["ticketId", "ticketNumber"] {
+                if let value = (data[key] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   SupportTicket.isHumanTicketNumber(value) {
+                    preservedNumber = value
+                    break
+                }
+            }
+        }
+
+        var replyPayload: [String: Any] = [
+            "adminReply": trimmedBody,
+            "updatedAt": FieldValue.serverTimestamp(),
+            "updatedBy": adminId
+        ]
+        if keepPending {
+            replyPayload["status"] = "new"
+            replyPayload["resolvedAt"] = FieldValue.delete()
+            replyPayload["resolvedBy"] = FieldValue.delete()
+            replyPayload["pendingUpdateEmailBody"] = trimmedBody
+            replyPayload["pendingUpdateEmailSentAt"] = FieldValue.serverTimestamp()
+        } else {
+            replyPayload["resolutionEmailBody"] = trimmedBody
+        }
+        if let preservedNumber {
+            replyPayload["ticketId"] = preservedNumber
+            replyPayload["ticketNumber"] = preservedNumber
+        }
+
+        try await db.collection("supportMessages").document(trimmedDocId).setData(replyPayload, merge: true)
+
+        var callablePayload: [String: Any] = [
+            "documentId": trimmedDocId,
+            "emailBody": trimmedBody,
+            "message": trimmedBody,
+            "keepPending": keepPending
+        ]
+        if let preservedNumber {
+            callablePayload["ticketNumber"] = preservedNumber
+        }
+
+        _ = try await Functions.functions(region: "us-central1")
+            .httpsCallable("adminResolveSupportTicket")
+            .call(callablePayload)
+
+        // Re-assert the human ticket number / reply after the callable.
+        var confirmPayload: [String: Any] = [
+            "adminReply": trimmedBody
+        ]
+        if keepPending {
+            confirmPayload["status"] = "new"
+            confirmPayload["pendingUpdateEmailBody"] = trimmedBody
+        } else {
+            confirmPayload["resolutionEmailBody"] = trimmedBody
+        }
+        if let preservedNumber {
+            confirmPayload["ticketId"] = preservedNumber
+            confirmPayload["ticketNumber"] = preservedNumber
+        }
+        try await db.collection("supportMessages").document(trimmedDocId).setData(confirmPayload, merge: true)
+    }
+
     private static func parseSupportTicket(documentID: String, data: [String: Any]) -> SupportTicket? {
         let message = (data["message"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !message.isEmpty else { return nil }
+        let rawImageURL = (data["imageURL"] as? String)
+            ?? (data["imageUrl"] as? String)
+            ?? (data["attachmentURL"] as? String)
+        let imageURL = rawImageURL?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedImageURL = (imageURL?.isEmpty == false) ? imageURL : nil
+        guard !message.isEmpty || trimmedImageURL != nil else { return nil }
 
         let createdAt: Date?
         if let timestamp = data["createdAt"] as? Timestamp {
@@ -1327,17 +1593,29 @@ class FirebaseAuthService: ObservableObject {
             resolvedAt = nil
         }
 
+        let updatedAt: Date?
+        if let timestamp = data["updatedAt"] as? Timestamp {
+            updatedAt = timestamp.dateValue()
+        } else if let interval = data["updatedAt"] as? TimeInterval {
+            updatedAt = Date(timeIntervalSince1970: interval)
+        } else {
+            updatedAt = nil
+        }
+
         let userName = (data["userName"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let topic = (data["topic"] as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let topic = Self.normalizeSupportTopic(
+            (data["topic"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        )
         let status = (data["status"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let ticketNumber = (data["ticketId"] as? String)?
+        let ticketNumber = Self.humanTicketNumber(documentID: documentID, data: data)
+
+        let adminReply = (data["resolutionEmailBody"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-            ?? (data["ticketNumber"] as? String)?
+            ?? (data["adminReply"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-            ?? ""
+        let trimmedReply = (adminReply?.isEmpty == false) ? adminReply : nil
 
         return SupportTicket(
             id: documentID,
@@ -1345,12 +1623,51 @@ class FirebaseAuthService: ObservableObject {
             userId: data["userId"] as? String ?? "",
             userName: userName.isEmpty ? "Unknown" : userName,
             userEmail: (data["userEmail"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
-            topic: topic.isEmpty ? "General" : topic,
+            topic: topic,
             message: message,
+            imageURL: trimmedImageURL,
             status: status.isEmpty ? "new" : status,
             createdAt: createdAt,
-            resolvedAt: resolvedAt
+            resolvedAt: resolvedAt,
+            updatedAt: updatedAt,
+            adminReply: trimmedReply
         )
+    }
+
+    /// Reads the human-readable ticket number, ignoring values that are just the Firestore doc id.
+    private static func humanTicketNumber(documentID: String, data: [String: Any]) -> String {
+        let keys = ["ticketNumber", "ticketId"]
+        var fallback = ""
+        for key in keys {
+            guard let value = (data[key] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty,
+                  value != documentID
+            else { continue }
+            if SupportTicket.isHumanTicketNumber(value) {
+                return value
+            }
+            if fallback.isEmpty {
+                fallback = value
+            }
+        }
+        return fallback
+    }
+
+    /// Turns `"[Account ban] Account ban"` into `"Account ban"`.
+    private static func normalizeSupportTopic(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "General" }
+        guard trimmed.hasPrefix("["), let close = trimmed.firstIndex(of: "]") else {
+            return trimmed
+        }
+        let remainder = trimmed[trimmed.index(after: close)...]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !remainder.isEmpty {
+            return String(remainder)
+        }
+        let inside = trimmed[trimmed.index(after: trimmed.startIndex)..<close]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return inside.isEmpty ? trimmed : String(inside)
     }
 
     func dismissReport(reportId: String) async throws {
@@ -1581,9 +1898,14 @@ class FirebaseAuthService: ObservableObject {
         async let warningsTask = db.collection("moderationWarnings")
             .whereField("userId", isEqualTo: trimmedId)
             .getDocuments()
+        async let deletionsTask = db.collection("moderationDeletions")
+            .whereField("userId", isEqualTo: trimmedId)
+            .getDocuments()
         async let userTask = db.collection("users").document(trimmedId).getDocument()
+        async let deletedRecordTask = db.collection("deletedAccountRecords").document(trimmedId).getDocument()
 
         var events: [AdminProfileHistoryEvent] = []
+        var hasAppendOnlyDeletionLog = false
 
         do {
             let snapshot = try await reportsTask
@@ -1631,9 +1953,36 @@ class FirebaseAuthService: ObservableObject {
             print("⚠️ Profile history warnings failed: \(error.localizedDescription)")
         }
 
-        // Fallback from user doc when collection history is incomplete.
+        // Append-only deletion log — every soft/full/undelete is a separate history item.
+        do {
+            let snapshot = try await deletionsTask
+            for document in snapshot.documents {
+                if let event = Self.parseDeletionHistoryEvent(documentID: document.documentID, data: document.data()) {
+                    events.append(event)
+                    hasAppendOnlyDeletionLog = true
+                }
+            }
+        } catch {
+            print("⚠️ Profile history deletions failed: \(error.localizedDescription)")
+        }
+
+        // Soft / full delete fallbacks from live user doc / purge tombstone (legacy only).
         if let userData = try? await userTask.data() {
             events.append(contentsOf: Self.fallbackHistoryEventsFromUser(userId: trimmedId, data: userData, existing: events))
+            if !hasAppendOnlyDeletionLog {
+                events.append(contentsOf: Self.deletionHistoryEventsFromUser(userId: trimmedId, data: userData, existing: events))
+            }
+        }
+
+        if !hasAppendOnlyDeletionLog,
+           let recordSnap = try? await deletedRecordTask,
+           recordSnap.exists,
+           let recordData = recordSnap.data() {
+            events.append(contentsOf: Self.deletionHistoryEventsFromAccountRecord(
+                userId: trimmedId,
+                data: recordData,
+                existing: events
+            ))
         }
 
         return events.sorted { $0.date > $1.date }
@@ -2154,6 +2503,33 @@ class FirebaseAuthService: ObservableObject {
         try await db.collection("moderationWarnings").addDocument(data: payload)
     }
 
+    /// Append-only deletion / undelete history for All profiles → History.
+    private func logModerationDeletionEvent(
+        userId: String,
+        type: AdminProfileHistoryKind,
+        deletedBy: DeletedByActor,
+        scheduledHardDeleteAt: Date? = nil,
+        createdAt: Date = Date(),
+        actorUserId: String? = nil
+    ) async throws {
+        guard type == .softDeleted || type == .fullyDeleted || type == .undeleted else { return }
+
+        var payload: [String: Any] = [
+            "userId": userId,
+            "type": type.rawValue,
+            "deletedBy": deletedBy.rawValue,
+            "deletedByAdmin": deletedBy == .admin,
+            "createdAt": createdAt.timeIntervalSince1970
+        ]
+        if let scheduledHardDeleteAt {
+            payload["scheduledHardDeleteAt"] = scheduledHardDeleteAt.timeIntervalSince1970
+        }
+        if let actorUserId, !actorUserId.isEmpty {
+            payload["actorUserId"] = actorUserId
+        }
+        try await db.collection("moderationDeletions").addDocument(data: payload)
+    }
+
     private func createBanHistoryRecord(
         userId: String,
         userData: [String: Any],
@@ -2426,9 +2802,11 @@ class FirebaseAuthService: ObservableObject {
 
         async let usersTask = db.collection("users").getDocuments()
         async let reportsTask = db.collection("reports").getDocuments()
+        async let supportTask = db.collection("supportMessages").getDocuments()
 
         let usersSnapshot = try await usersTask
         let reportsSnapshot = try await reportsTask
+        let supportSnapshot = try await supportTask
 
         let calendar = Calendar.current
         let startOfToday = calendar.startOfDay(for: Date())
@@ -2479,11 +2857,26 @@ class FirebaseAuthService: ObservableObject {
             }
         }
 
+        var pendingSupportTickets = 0
+        var resolvedSupportTickets = 0
+        for document in supportSnapshot.documents {
+            let status = (document.data()["status"] as? String ?? "new")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            if status == "resolved" || status == "closed" {
+                resolvedSupportTickets += 1
+            } else {
+                pendingSupportTickets += 1
+            }
+        }
+
         return AdminDashboardStats(
             totalUsers: totalUsers,
             activeUsers: activeUsers,
             onlineUsers: onlineUsers,
             pendingReports: pendingReports,
+            pendingSupportTickets: pendingSupportTickets,
+            resolvedSupportTickets: resolvedSupportTickets,
             newRegistrationsToday: newRegistrationsToday,
             activeBans: activeBans,
             activeFreezes: activeFreezes,
@@ -2785,6 +3178,8 @@ class FirebaseAuthService: ObservableObject {
             "deletedByAdmin": true,
             "lastDeletedByAdmin": true
         ], merge: true)
+
+        // History append is written by adminHardDeleteUser (moderationDeletions).
     }
 
     /// Restores a soft-deleted account (clears delete flags, recreates Auth if needed).
@@ -3681,6 +4076,69 @@ class FirebaseAuthService: ObservableObject {
         )
     }
 
+    private static func parseDeletionHistoryEvent(documentID: String, data: [String: Any]) -> AdminProfileHistoryEvent? {
+        let typeRaw = (data["type"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let kind = AdminProfileHistoryKind(rawValue: typeRaw),
+              kind == .softDeleted || kind == .fullyDeleted || kind == .undeleted
+        else { return nil }
+
+        let createdAt = parseEpochDate(from: data["createdAt"])
+            ?? (data["createdAt"] as? Timestamp)?.dateValue()
+            ?? Date.distantPast
+
+        let actor: DeletedByActor
+        if data["deletedByAdmin"] as? Bool == true {
+            actor = .admin
+        } else {
+            actor = parseDeletedByActor(from: data)
+        }
+
+        var detailParts: [String] = []
+        if kind == .softDeleted || kind == .fullyDeleted {
+            detailParts.append(
+                String(
+                    format: "admin.all.profiles.history.deleted.by".localized,
+                    actor.localizationKey.localized
+                )
+            )
+        }
+        if kind == .softDeleted,
+           let scheduledAt = parseEpochDate(from: data["scheduledHardDeleteAt"]) {
+            detailParts.append(
+                String(
+                    format: "admin.all.profiles.history.fully.deleted.scheduled".localized,
+                    ModerationNotice.formattedUnlockDate(scheduledAt)
+                )
+            )
+        }
+
+        let title: String
+        let status: String?
+        switch kind {
+        case .softDeleted:
+            title = "admin.all.profiles.history.soft.deleted".localized
+            status = DeleteRecordStatus.active.localizationKey.localized
+        case .fullyDeleted:
+            title = "admin.all.profiles.history.fully.deleted".localized
+            status = DeleteRecordStatus.fullyDeleted.localizationKey.localized
+        case .undeleted:
+            title = "admin.all.profiles.history.undeleted".localized
+            status = DeleteRecordStatus.restored.localizationKey.localized
+        default:
+            return nil
+        }
+
+        return AdminProfileHistoryEvent(
+            id: "deletion-\(documentID)",
+            kind: kind,
+            title: title,
+            detail: detailParts.isEmpty ? nil : detailParts.joined(separator: " · "),
+            status: status,
+            date: createdAt
+        )
+    }
+
     private static func fallbackHistoryEventsFromUser(
         userId: String,
         data: [String: Any],
@@ -3786,6 +4244,125 @@ class FirebaseAuthService: ObservableObject {
                     detail: message,
                     status: nil,
                     date: createdAt
+                )
+            )
+        }
+
+        return extras
+    }
+
+    private static func deletionHistoryEventsFromUser(
+        userId: String,
+        data: [String: Any],
+        existing: [AdminProfileHistoryEvent]
+    ) -> [AdminProfileHistoryEvent] {
+        var extras: [AdminProfileHistoryEvent] = []
+        let hasSoftDelete = existing.contains { $0.kind == .softDeleted }
+        let hasUndelete = existing.contains { $0.kind == .undeleted }
+        let actor = parseDeletedByActor(from: data)
+        let actorDetail = String(
+            format: "admin.all.profiles.history.deleted.by".localized,
+            actor.localizationKey.localized
+        )
+
+        if data["isDeleted"] as? Bool == true {
+            if !hasSoftDelete, let deletedAt = parseEpochDate(from: data["deletedAt"]) {
+                var detailParts = [actorDetail]
+                if let fullyAt = parseEpochDate(from: data["scheduledHardDeleteAt"]) {
+                    detailParts.append(
+                        String(
+                            format: "admin.all.profiles.history.fully.deleted.scheduled".localized,
+                            ModerationNotice.formattedUnlockDate(fullyAt)
+                        )
+                    )
+                }
+                extras.append(
+                    AdminProfileHistoryEvent(
+                        id: "soft-delete-user-\(userId)",
+                        kind: .softDeleted,
+                        title: "admin.all.profiles.history.soft.deleted".localized,
+                        detail: detailParts.joined(separator: " · "),
+                        status: DeleteRecordStatus.active.localizationKey.localized,
+                        date: deletedAt
+                    )
+                )
+            }
+            return extras
+        }
+
+        // Restored account: keep soft-delete + undelete in history.
+        if !hasSoftDelete, let deletedAt = parseEpochDate(from: data["lastDeletedAt"]) {
+            let restoredActor = parseDeletedByActor(from: data, preferLast: true)
+            let restoredActorDetail = String(
+                format: "admin.all.profiles.history.deleted.by".localized,
+                restoredActor.localizationKey.localized
+            )
+            extras.append(
+                AdminProfileHistoryEvent(
+                    id: "soft-delete-user-\(userId)",
+                    kind: .softDeleted,
+                    title: "admin.all.profiles.history.soft.deleted".localized,
+                    detail: restoredActorDetail,
+                    status: DeleteRecordStatus.active.localizationKey.localized,
+                    date: deletedAt
+                )
+            )
+        }
+
+        if !hasUndelete, let restoredAt = parseEpochDate(from: data["lastAccountRestoredAt"]) {
+            extras.append(
+                AdminProfileHistoryEvent(
+                    id: "undelete-user-\(userId)",
+                    kind: .undeleted,
+                    title: "admin.all.profiles.history.undeleted".localized,
+                    detail: nil,
+                    status: DeleteRecordStatus.restored.localizationKey.localized,
+                    date: restoredAt
+                )
+            )
+        }
+
+        return extras
+    }
+
+    private static func deletionHistoryEventsFromAccountRecord(
+        userId: String,
+        data: [String: Any],
+        existing: [AdminProfileHistoryEvent]
+    ) -> [AdminProfileHistoryEvent] {
+        guard data["isFullyDeleted"] as? Bool == true else { return [] }
+
+        var extras: [AdminProfileHistoryEvent] = []
+        let hasSoftDelete = existing.contains { $0.kind == .softDeleted }
+        let hasFullDelete = existing.contains { $0.kind == .fullyDeleted }
+        let actor = parseDeletedByActor(from: data)
+        let actorDetail = String(
+            format: "admin.all.profiles.history.deleted.by".localized,
+            actor.localizationKey.localized
+        )
+
+        if !hasSoftDelete, let deletedAt = parseEpochDate(from: data["deletedAt"]) {
+            extras.append(
+                AdminProfileHistoryEvent(
+                    id: "soft-delete-record-\(userId)",
+                    kind: .softDeleted,
+                    title: "admin.all.profiles.history.soft.deleted".localized,
+                    detail: actorDetail,
+                    status: DeleteRecordStatus.active.localizationKey.localized,
+                    date: deletedAt
+                )
+            )
+        }
+
+        if !hasFullDelete, let fullyDeletedAt = parseEpochDate(from: data["fullyDeletedAt"]) {
+            extras.append(
+                AdminProfileHistoryEvent(
+                    id: "full-delete-record-\(userId)",
+                    kind: .fullyDeleted,
+                    title: "admin.all.profiles.history.fully.deleted".localized,
+                    detail: actorDetail,
+                    status: DeleteRecordStatus.fullyDeleted.localizationKey.localized,
+                    date: fullyDeletedAt
                 )
             )
         }

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct AdminDeletedProfilesView: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var appState: AppStateManager
     @State private var filter: AdminDeletedFilter = .deleted
     @State private var deletedProfiles: [DeletedProfile] = []
     @State private var historyProfiles: [DeletedProfile] = []
@@ -10,11 +11,28 @@ struct AdminDeletedProfilesView: View {
     @State private var pendingConfirmation: DeletedActionConfirmation?
     @State private var actionError: String?
     @State private var isPerformingAction = false
+    @State private var searchText = ""
+
+    private var trimmedSearch: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isSearchActive: Bool {
+        !trimmedSearch.isEmpty
+    }
 
     private var displayedProfiles: [DeletedProfile] {
+        let base: [DeletedProfile]
         switch filter {
-        case .deleted: return deletedProfiles
-        case .history: return historyProfiles
+        case .deleted: base = deletedProfiles
+        case .history: base = historyProfiles
+        }
+        guard isSearchActive else { return base }
+        let query = trimmedSearch.lowercased()
+        return base.filter { profile in
+            profile.name.lowercased().contains(query)
+                || (profile.email?.lowercased().contains(query) ?? false)
+                || profile.userId.lowercased().contains(query)
         }
     }
 
@@ -28,7 +46,12 @@ struct AdminDeletedProfilesView: View {
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 10)
+
+                searchBar
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
 
                 Group {
                     if isLoading {
@@ -58,6 +81,14 @@ struct AdminDeletedProfilesView: View {
             .navigationTitle("admin.deleted.title".localized)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        Task { await loadProfiles(forceRefresh: true) }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .disabled(isLoading)
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("common.done".localized) { dismiss() }
                 }
@@ -111,13 +142,13 @@ struct AdminDeletedProfilesView: View {
 
     private var emptyState: some View {
         VStack(spacing: 12) {
-            Image(systemName: filter == .deleted ? "trash.circle" : "clock.arrow.circlepath")
+            Image(systemName: isSearchActive ? "magnifyingglass" : (filter == .deleted ? "trash.circle" : "clock.arrow.circlepath"))
                 .font(.system(size: 44))
                 .foregroundColor(.purple)
-            Text(filter.emptyTitle)
+            Text(isSearchActive ? "admin.restrict.search.empty".localized : filter.emptyTitle)
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundColor(SpectRoomTheme.text)
-            Text(filter.emptyDescription)
+            Text(isSearchActive ? "admin.restrict.search.empty.description".localized : filter.emptyDescription)
                 .font(.subheadline)
                 .multilineTextAlignment(.center)
                 .foregroundColor(SpectRoomTheme.secondaryText)
@@ -126,8 +157,40 @@ struct AdminDeletedProfilesView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private var searchBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .foregroundColor(SpectRoomTheme.secondaryText)
+            TextField("admin.restrict.search.placeholder".localized, text: $searchText)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                .keyboardType(.asciiCapable)
+                .textContentType(.none)
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(SpectRoomTheme.secondaryText)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(SpectRoomTheme.card)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
     @MainActor
-    private func loadProfiles() async {
+    private func loadProfiles(forceRefresh: Bool = false) async {
+        if !forceRefresh, let cache = appState.adminDeletedProfilesCache {
+            deletedProfiles = cache.deleted
+            historyProfiles = cache.history
+            isLoading = false
+            return
+        }
+
         isLoading = true
         defer { isLoading = false }
 
@@ -148,6 +211,10 @@ struct AdminDeletedProfilesView: View {
             if filter == .history {
                 errors.append(error.localizedDescription)
             }
+        }
+
+        if errors.isEmpty {
+            appState.updateAdminDeletedProfilesCache(deleted: deletedProfiles, history: historyProfiles)
         }
 
         if let firstError = errors.first {
@@ -176,7 +243,7 @@ struct AdminDeletedProfilesView: View {
             try await FirebaseAuthService.shared.undeleteAdminUser(userId: profile.userId)
             selectedProfile = nil
             filter = .history
-            await loadProfiles()
+            await loadProfiles(forceRefresh: true)
         } catch {
             actionError = error.localizedDescription
         }
@@ -191,7 +258,7 @@ struct AdminDeletedProfilesView: View {
             try await FirebaseAuthService.shared.hardDeleteAdminUser(userId: profile.userId)
             selectedProfile = nil
             filter = .deleted
-            await loadProfiles()
+            await loadProfiles(forceRefresh: true)
         } catch {
             actionError = error.localizedDescription
         }
@@ -397,7 +464,7 @@ private struct AdminDeletedProfileDetailOverlay: View {
                     } else if profile.isHistoryItem {
                         HStack(spacing: 12) {
                             Button(action: onDismiss) {
-                                Text("common.cancel".localized)
+                                Text("common.close".localized)
                                     .font(.body.weight(.semibold))
                                     .foregroundColor(primaryText)
                                     .frame(maxWidth: .infinity)
@@ -422,7 +489,7 @@ private struct AdminDeletedProfileDetailOverlay: View {
                     } else {
                         HStack(spacing: 12) {
                             Button(action: onDismiss) {
-                                Text("common.cancel".localized)
+                                Text("common.close".localized)
                                     .font(.body.weight(.semibold))
                                     .foregroundColor(primaryText)
                                     .frame(maxWidth: .infinity)

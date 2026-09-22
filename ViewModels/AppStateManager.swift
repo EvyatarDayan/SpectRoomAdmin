@@ -22,6 +22,43 @@ struct DiscoverDeckFilterSignature: Codable, Equatable {
     let distanceLimitRawValue: Int
 }
 
+struct AdminAllProfilesListCache {
+    var profiles: [AdminUserProfile]
+    var lastDocumentId: String?
+    var hasMore: Bool
+    var totalCount: Int?
+}
+
+struct AdminDashboardStatsCache {
+    var stats: AdminDashboardStats
+    var lastUpdated: Date
+}
+
+struct AdminSupportTicketsCache {
+    /// All enriched tickets (before status / topic / search filters).
+    var tickets: [SupportTicket]
+    var lastUpdated: Date
+}
+
+struct AdminFrozenProfilesCache {
+    var frozen: [FrozenProfile]
+    var history: [FrozenProfile]
+}
+
+struct AdminBannedProfilesCache {
+    var banned: [BannedProfile]
+    var history: [BannedProfile]
+}
+
+struct AdminDeletedProfilesCache {
+    var deleted: [DeletedProfile]
+    var history: [DeletedProfile]
+}
+
+struct AdminReportsCache {
+    var reports: [UserReport]
+}
+
 class AppStateManager: ObservableObject {
     @Published var isAuthenticated = false
     @Published var hasResolvedAuthState = false
@@ -49,8 +86,21 @@ class AppStateManager: ObservableObject {
     @Published var pendingModerationNotice: ModerationNotice?
     /// Switch footer tab from nested sheets (e.g. report email → All Profiles).
     @Published var requestedAdminTab: Int?
+    /// Open a Restrict hub sheet after switching to the Restrict tab.
+    @Published var requestedAdminRestrictSheet: AdminRestrictSheet?
     /// Prefill All Profiles search after navigating from another admin screen.
     @Published var pendingProfilesSearchQuery: String?
+    /// In-session cache for All Profiles list (avoids full reload when switching tabs).
+    private(set) var adminAllProfilesCache: AdminAllProfilesListCache?
+    /// In-session cache for Dashboard metrics.
+    private(set) var adminDashboardStatsCache: AdminDashboardStatsCache?
+    /// In-session cache for Support tickets (full enriched list).
+    private(set) var adminSupportTicketsCache: AdminSupportTicketsCache?
+    /// In-session caches for Restrict hub lists.
+    private(set) var adminFrozenProfilesCache: AdminFrozenProfilesCache?
+    private(set) var adminBannedProfilesCache: AdminBannedProfilesCache?
+    private(set) var adminDeletedProfilesCache: AdminDeletedProfilesCache?
+    private(set) var adminReportsCache: AdminReportsCache?
     /// Pending reports the admin has not opened yet (Restrict / reports badge).
     @Published var unseenAdminReportCount: Int = 0
     @Published private(set) var unseenAdminReportIds: Set<String> = []
@@ -356,6 +406,10 @@ class AppStateManager: ObservableObject {
                     pendingDiscoverUnblockRestoreUserId = nil
                     clearMessageConversationsCache()
                     clearDiscoverProfilesCache()
+                    clearAdminAllProfilesCache()
+                    clearAdminDashboardStatsCache()
+                    clearAdminSupportTicketsCache()
+                    clearAdminRestrictListCaches()
                     
                     saveAppState()
                     print("🔐 User signed out successfully")
@@ -607,6 +661,105 @@ class AppStateManager: ObservableObject {
         cachedDiscoverFilterSignature = nil
         isDiscoverProfilesCacheValid = false
         clearPersistedDiscoverProfilesCache()
+    }
+
+    var hasValidAdminAllProfilesCache: Bool {
+        guard let cache = adminAllProfilesCache else { return false }
+        return !cache.profiles.isEmpty
+    }
+
+    func updateAdminAllProfilesCache(
+        profiles: [AdminUserProfile],
+        lastDocumentId: String?,
+        hasMore: Bool,
+        totalCount: Int?
+    ) {
+        guard !profiles.isEmpty else {
+            clearAdminAllProfilesCache()
+            return
+        }
+        adminAllProfilesCache = AdminAllProfilesListCache(
+            profiles: profiles,
+            lastDocumentId: lastDocumentId,
+            hasMore: hasMore,
+            totalCount: totalCount
+        )
+    }
+
+    func clearAdminAllProfilesCache() {
+        adminAllProfilesCache = nil
+    }
+
+    var hasValidAdminDashboardStatsCache: Bool {
+        guard let cache = adminDashboardStatsCache else { return false }
+        return cache.stats != .empty
+    }
+
+    func updateAdminDashboardStatsCache(stats: AdminDashboardStats, lastUpdated: Date = Date()) {
+        guard stats != .empty else {
+            clearAdminDashboardStatsCache()
+            return
+        }
+        adminDashboardStatsCache = AdminDashboardStatsCache(stats: stats, lastUpdated: lastUpdated)
+    }
+
+    func clearAdminDashboardStatsCache() {
+        adminDashboardStatsCache = nil
+    }
+
+    var hasValidAdminSupportTicketsCache: Bool {
+        guard let cache = adminSupportTicketsCache else { return false }
+        return !cache.tickets.isEmpty
+    }
+
+    func updateAdminSupportTicketsCache(tickets: [SupportTicket], lastUpdated: Date = Date()) {
+        adminSupportTicketsCache = AdminSupportTicketsCache(
+            tickets: tickets,
+            lastUpdated: lastUpdated
+        )
+    }
+
+    func clearAdminSupportTicketsCache() {
+        adminSupportTicketsCache = nil
+    }
+
+    func updateAdminFrozenProfilesCache(frozen: [FrozenProfile], history: [FrozenProfile]) {
+        adminFrozenProfilesCache = AdminFrozenProfilesCache(frozen: frozen, history: history)
+    }
+
+    func clearAdminFrozenProfilesCache() {
+        adminFrozenProfilesCache = nil
+    }
+
+    func updateAdminBannedProfilesCache(banned: [BannedProfile], history: [BannedProfile]) {
+        adminBannedProfilesCache = AdminBannedProfilesCache(banned: banned, history: history)
+    }
+
+    func clearAdminBannedProfilesCache() {
+        adminBannedProfilesCache = nil
+    }
+
+    func updateAdminDeletedProfilesCache(deleted: [DeletedProfile], history: [DeletedProfile]) {
+        adminDeletedProfilesCache = AdminDeletedProfilesCache(deleted: deleted, history: history)
+    }
+
+    func clearAdminDeletedProfilesCache() {
+        adminDeletedProfilesCache = nil
+    }
+
+    func updateAdminReportsCache(reports: [UserReport]) {
+        adminReportsCache = AdminReportsCache(reports: reports)
+    }
+
+    func clearAdminReportsCache() {
+        adminReportsCache = nil
+    }
+
+    func clearAdminRestrictListCaches() {
+        clearAdminFrozenProfilesCache()
+        clearAdminBannedProfilesCache()
+        clearAdminDeletedProfilesCache()
+        clearAdminReportsCache()
     }
     
     func invalidateDiscoverDeckAfterProfileUpdate() {
@@ -951,6 +1104,13 @@ class AppStateManager: ObservableObject {
         guard !trimmed.isEmpty else { return }
         pendingProfilesSearchQuery = trimmed
         requestedAdminTab = AdminTab.profiles.rawValue
+    }
+
+    /// Switch to Restrict and present the given hub sheet (e.g. Reported profiles).
+    @MainActor
+    func openAdminRestrict(_ sheet: AdminRestrictSheet) {
+        requestedAdminRestrictSheet = sheet
+        requestedAdminTab = AdminTab.admin.rawValue
     }
 
     private var isDismissingModerationNotice = false

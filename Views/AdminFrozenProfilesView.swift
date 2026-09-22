@@ -2,6 +2,7 @@ import SwiftUI
 
 struct AdminFrozenProfilesView: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var appState: AppStateManager
     @State private var filter: AdminFrozenFilter = .frozen
     @State private var frozenProfiles: [FrozenProfile] = []
     @State private var historyProfiles: [FrozenProfile] = []
@@ -12,11 +13,28 @@ struct AdminFrozenProfilesView: View {
     @State private var pendingConfirmation: FrozenActionConfirmation?
     @State private var actionError: String?
     @State private var isPerformingAction = false
+    @State private var searchText = ""
+
+    private var trimmedSearch: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isSearchActive: Bool {
+        !trimmedSearch.isEmpty
+    }
 
     private var displayedProfiles: [FrozenProfile] {
+        let base: [FrozenProfile]
         switch filter {
-        case .frozen: return frozenProfiles
-        case .history: return historyProfiles
+        case .frozen: base = frozenProfiles
+        case .history: base = historyProfiles
+        }
+        guard isSearchActive else { return base }
+        let query = trimmedSearch.lowercased()
+        return base.filter { profile in
+            profile.name.lowercased().contains(query)
+                || (profile.email?.lowercased().contains(query) ?? false)
+                || profile.userId.lowercased().contains(query)
         }
     }
 
@@ -30,7 +48,12 @@ struct AdminFrozenProfilesView: View {
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 10)
+
+                searchBar
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
 
                 Group {
                     if isLoading {
@@ -60,6 +83,14 @@ struct AdminFrozenProfilesView: View {
             .navigationTitle("admin.frozen.title".localized)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        Task { await loadProfiles(forceRefresh: true) }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .disabled(isLoading)
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("common.done".localized) { dismiss() }
                 }
@@ -135,13 +166,13 @@ struct AdminFrozenProfilesView: View {
 
     private var emptyState: some View {
         VStack(spacing: 12) {
-            Image(systemName: filter == .frozen ? "snowflake" : "clock.arrow.circlepath")
+            Image(systemName: isSearchActive ? "magnifyingglass" : (filter == .frozen ? "snowflake" : "clock.arrow.circlepath"))
                 .font(.system(size: 44))
                 .foregroundColor(.blue)
-            Text(filter.emptyTitle)
+            Text(isSearchActive ? "admin.restrict.search.empty".localized : filter.emptyTitle)
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundColor(SpectRoomTheme.text)
-            Text(filter.emptyDescription)
+            Text(isSearchActive ? "admin.restrict.search.empty.description".localized : filter.emptyDescription)
                 .font(.subheadline)
                 .multilineTextAlignment(.center)
                 .foregroundColor(SpectRoomTheme.secondaryText)
@@ -150,8 +181,40 @@ struct AdminFrozenProfilesView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private var searchBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .foregroundColor(SpectRoomTheme.secondaryText)
+            TextField("admin.restrict.search.placeholder".localized, text: $searchText)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                .keyboardType(.asciiCapable)
+                .textContentType(.none)
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(SpectRoomTheme.secondaryText)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(SpectRoomTheme.card)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
     @MainActor
-    private func loadProfiles() async {
+    private func loadProfiles(forceRefresh: Bool = false) async {
+        if !forceRefresh, let cache = appState.adminFrozenProfilesCache {
+            frozenProfiles = cache.frozen
+            historyProfiles = cache.history
+            isLoading = false
+            return
+        }
+
         isLoading = true
         defer { isLoading = false }
 
@@ -173,6 +236,10 @@ struct AdminFrozenProfilesView: View {
             if filter == .history {
                 errors.append(error.localizedDescription)
             }
+        }
+
+        if errors.isEmpty {
+            appState.updateAdminFrozenProfilesCache(frozen: frozenProfiles, history: historyProfiles)
         }
 
         if let firstError = errors.first {
@@ -201,7 +268,7 @@ struct AdminFrozenProfilesView: View {
         do {
             try await FirebaseAuthService.shared.removeAccountFreeze(userId: profile.userId)
             selectedProfile = nil
-            await loadProfiles()
+            await loadProfiles(forceRefresh: true)
         } catch {
             actionError = error.localizedDescription
         }
@@ -219,7 +286,7 @@ struct AdminFrozenProfilesView: View {
                 duration: duration
             )
             selectedProfile = nil
-            await loadProfiles()
+            await loadProfiles(forceRefresh: true)
         } catch {
             actionError = error.localizedDescription
         }
@@ -239,7 +306,7 @@ struct AdminFrozenProfilesView: View {
             )
             selectedProfile = nil
             filter = .frozen
-            await loadProfiles()
+            await loadProfiles(forceRefresh: true)
         } catch {
             actionError = error.localizedDescription
         }

@@ -75,16 +75,35 @@ struct AdminDashboardView: View {
                 Text(
                     String(
                         format: "dashboard.updated".localized,
-                        lastUpdated?.formatted(date: .omitted, time: .shortened) ?? "—"
+                        lastUpdated.map { Self.dashboardUpdatedTimestamp($0) } ?? "—"
                     )
                 )
-                .font(.headline)
-                .foregroundColor(SpectRoomTheme.text)
+                .font(.subheadline)
+                .foregroundColor(SpectRoomTheme.secondaryText)
                 .padding(.horizontal, 4)
                 .padding(.bottom, 4)
 
                 ForEach(metricRows) { row in
-                    metricCard(for: row)
+                    Group {
+                        if row.destinationTab != nil || row.restrictSheet != nil {
+                            Button {
+                                if let sheet = row.restrictSheet {
+                                    appState.openAdminRestrict(sheet)
+                                } else if let destinationTab = row.destinationTab {
+                                    appState.requestedAdminTab = destinationTab
+                                }
+                            } label: {
+                                metricCard(for: row)
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            metricCard(for: row)
+                        }
+                    }
+                    if row.id == "support-pending" {
+                        Divider()
+                            .padding(.vertical, 4)
+                    }
                 }
             }
             .padding(.horizontal, horizontalPadding)
@@ -97,9 +116,9 @@ struct AdminDashboardView: View {
         HStack(spacing: 14) {
             Image(systemName: row.systemImage)
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundColor(row.accent)
+                .foregroundColor(.blue)
                 .frame(width: 36, height: 36)
-                .background(row.accent.opacity(0.14))
+                .background(Color.blue.opacity(0.14))
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
             VStack(alignment: .leading, spacing: 4) {
@@ -161,7 +180,7 @@ struct AdminDashboardView: View {
                 subtitle: "dashboard.metric.total.users.subtitle".localized,
                 value: stats.totalUsers,
                 systemImage: "person.3.fill",
-                accent: .purple
+                destinationTab: AdminTab.profiles.rawValue
             ),
             DashboardMetricRowModel(
                 id: "active",
@@ -169,7 +188,7 @@ struct AdminDashboardView: View {
                 subtitle: "dashboard.metric.active.users.subtitle".localized,
                 value: stats.activeUsers,
                 systemImage: "person.2.fill",
-                accent: .green
+                destinationTab: AdminTab.profiles.rawValue
             ),
             DashboardMetricRowModel(
                 id: "online",
@@ -177,15 +196,23 @@ struct AdminDashboardView: View {
                 subtitle: "dashboard.metric.online.users.subtitle".localized,
                 value: stats.onlineUsers,
                 systemImage: "circle.fill",
-                accent: .green
+                destinationTab: AdminTab.profiles.rawValue
+            ),
+            DashboardMetricRowModel(
+                id: "support-pending",
+                title: "dashboard.metric.support.pending".localized,
+                subtitle: "dashboard.metric.support.pending.subtitle".localized,
+                value: stats.pendingSupportTickets,
+                systemImage: "envelope.badge.fill",
+                destinationTab: AdminTab.support.rawValue
             ),
             DashboardMetricRowModel(
                 id: "pending",
                 title: "dashboard.metric.pending.reports".localized,
                 subtitle: "dashboard.metric.pending.reports.subtitle".localized,
                 value: stats.pendingReports,
-                systemImage: "exclamationmark.bubble.fill",
-                accent: .orange
+                systemImage: "shield.fill",
+                restrictSheet: .reports
             ),
             DashboardMetricRowModel(
                 id: "bans",
@@ -193,7 +220,7 @@ struct AdminDashboardView: View {
                 subtitle: "dashboard.metric.active.bans.subtitle".localized,
                 value: stats.activeBans,
                 systemImage: "person.crop.circle.badge.xmark",
-                accent: .red
+                restrictSheet: .banned
             ),
             DashboardMetricRowModel(
                 id: "freezes",
@@ -201,25 +228,16 @@ struct AdminDashboardView: View {
                 subtitle: "dashboard.metric.active.freezes.subtitle".localized,
                 value: stats.activeFreezes,
                 systemImage: "snowflake",
-                accent: .blue
-            ),
-            DashboardMetricRowModel(
-                id: "resolved",
-                title: "dashboard.metric.resolved.today".localized,
-                subtitle: "dashboard.metric.resolved.today.subtitle".localized,
-                value: stats.reportsResolvedToday,
-                systemImage: "checkmark.shield.fill",
-                accent: .mint
-            ),
-            DashboardMetricRowModel(
-                id: "new",
-                title: "dashboard.metric.new.today".localized,
-                subtitle: "dashboard.metric.new.today.subtitle".localized,
-                value: stats.newRegistrationsToday,
-                systemImage: "person.badge.plus",
-                accent: .blue
+                restrictSheet: .frozen
             )
         ]
+    }
+
+    private static func dashboardUpdatedTimestamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = .current
+        formatter.dateFormat = "EEE d MMM HH:mm"
+        return formatter.string(from: date)
     }
 
     @MainActor
@@ -228,6 +246,17 @@ struct AdminDashboardView: View {
             isLoading = false
             return
         }
+
+        if !force,
+           let cache = appState.adminDashboardStatsCache,
+           cache.stats != .empty {
+            stats = cache.stats
+            lastUpdated = cache.lastUpdated
+            isLoading = false
+            loadError = nil
+            return
+        }
+
         if isLoading && !force && stats != .empty { return }
 
         isLoading = true
@@ -236,6 +265,7 @@ struct AdminDashboardView: View {
             let result = try await FirebaseAuthService.shared.fetchAdminDashboardStats()
             stats = result
             lastUpdated = Date()
+            appState.updateAdminDashboardStatsCache(stats: result, lastUpdated: lastUpdated ?? Date())
         } catch {
             loadError = error.localizedDescription
             print("⚠️ Dashboard stats failed: \(error.localizedDescription)")
@@ -250,7 +280,8 @@ private struct DashboardMetricRowModel: Identifiable {
     let subtitle: String
     let value: Int
     let systemImage: String
-    let accent: Color
+    var destinationTab: Int? = nil
+    var restrictSheet: AdminRestrictSheet? = nil
 }
 
 #Preview {

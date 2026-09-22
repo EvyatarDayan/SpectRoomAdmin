@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import FirebaseAuth
 import FirebaseFirestore
 
 struct HelpSupportView: View {
@@ -308,30 +309,80 @@ private extension HelpSupportView {
 
         isSending = true
 
-        let userId = appState.currentUser?.firebaseDocumentId ?? appState.currentUser?.id.uuidString ?? "unknown"
-        let userName = appState.currentUser?.name ?? "Unknown"
-        let userEmail = appState.currentUser?.email ?? ""
+        Task {
+            let authUser = Auth.auth().currentUser
+            var userId = appState.currentUser?.firebaseDocumentId
+                ?? authUser?.uid
+                ?? appState.currentUser?.id.uuidString
+                ?? ""
+            var userName = (appState.currentUser?.name ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            var userEmail = (appState.currentUser?.email ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let data: [String: Any] = [
-            "userId": userId,
-            "userName": userName,
-            "userEmail": userEmail,
-            "topic": selectedTopic.label,
-            "message": trimmed,
-            "status": "new",
-            "createdAt": FieldValue.serverTimestamp()
-        ]
+            if let authUser {
+                if userId.isEmpty || userId.lowercased() == "unknown" {
+                    userId = authUser.uid
+                }
+                if userEmail.isEmpty, let email = authUser.email {
+                    userEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                if SupportTicket.isPlaceholderName(userName),
+                   let displayName = authUser.displayName?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                   !SupportTicket.isPlaceholderName(displayName) {
+                    userName = displayName
+                }
+            }
 
-        Firestore.firestore().collection("supportMessages").addDocument(data: data) { error in
-            isSending = false
-            if let error {
-                errorMessage = error.localizedDescription
-                showErrorAlert = true
-            } else {
-                didSendSuccessfully = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    onMessageSent?()
-                    dismiss()
+            if !userId.isEmpty,
+               let snap = try? await Firestore.firestore().collection("users").document(userId).getDocument(),
+               let data = snap.data() {
+                if SupportTicket.isPlaceholderName(userName),
+                   let name = (data["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !SupportTicket.isPlaceholderName(name) {
+                    userName = name
+                }
+                if userEmail.isEmpty || !userEmail.contains("@"),
+                   let email = (data["email"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   email.contains("@") {
+                    userEmail = email
+                }
+            }
+
+            if SupportTicket.isPlaceholderName(userName) {
+                userName = "Unknown"
+            }
+
+            let ticketId = SupportTicket.makeSupportTicketId()
+
+            let data: [String: Any] = [
+                "ticketId": ticketId,
+                "ticketNumber": ticketId,
+                "userId": userId.isEmpty ? "unknown" : userId,
+                "userName": userName,
+                "userEmail": userEmail,
+                "topic": selectedTopic.label,
+                "message": trimmed,
+                "status": "new",
+                "createdAt": FieldValue.serverTimestamp()
+            ]
+
+            do {
+                try await Firestore.firestore().collection("supportMessages").addDocument(data: data)
+                await MainActor.run {
+                    isSending = false
+                    didSendSuccessfully = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        onMessageSent?()
+                        dismiss()
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    isSending = false
+                    errorMessage = error.localizedDescription
+                    showErrorAlert = true
                 }
             }
         }

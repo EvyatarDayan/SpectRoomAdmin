@@ -267,6 +267,9 @@ enum AdminProfileHistoryKind: String, Equatable {
     case freezeEnded
     case ban
     case banLifted
+    case softDeleted
+    case fullyDeleted
+    case undeleted
 }
 
 struct AdminProfileHistoryEvent: Identifiable, Equatable {
@@ -285,6 +288,9 @@ struct AdminProfileHistoryEvent: Identifiable, Equatable {
         case .freezeEnded: return "sun.max.fill"
         case .ban: return "person.crop.circle.badge.xmark"
         case .banLifted: return "person.crop.circle.badge.checkmark"
+        case .softDeleted: return "trash"
+        case .fullyDeleted: return "trash.fill"
+        case .undeleted: return "arrow.uturn.backward.circle.fill"
         }
     }
 }
